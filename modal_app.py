@@ -17,14 +17,15 @@ image = (
     .apt_install("libgl1", "libglib2.0-0")
     .pip_install(
         "vllm>=0.13.0",
-        "huggingface-hub[hf_xet]",
-        "easyocr",
+        "huggingface-hub",
         "opencv-python-headless",
         "Pillow",
         "numpy",
         "httpx",
         "fastapi",
     )
+    .pip_install("easyocr", extra_options="--no-deps")
+    .pip_install("python-bidi", "scikit-image")
     .run_function(download_model)
 )
 
