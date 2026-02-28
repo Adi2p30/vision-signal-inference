@@ -16,24 +16,28 @@ let lastScoreA_ts = 0, lastScoreB_ts = 0;
 const allRows = [];
 let fpsTimestamps = [];
 
-// Play-by-play score -> wallclock mapping
-// Key: "awayScore-homeScore", Value: wallclock ISO string (last play with that score)
+// Play-by-play lookups for score+clock -> wallclock mapping
+// Precise key: "awayScore-homeScore@clock" (e.g. "45-42@14:32")
+// Fallback key: "awayScore-homeScore" (first play that reached that score)
+let scoreClockToWallclock = {};
 let scoreToWallclock = {};
 
 fetch('/play-by-play')
   .then(r => r.json())
   .then(plays => {
-    // Build lookup: for each unique score state, store the wallclock of the
-    // first play that reached that score (the scoring play itself)
-    const seen = new Set();
+    const seenScore = new Set();
     for (const p of plays) {
-      const key = p.awayScore + '-' + p.homeScore;
-      if (!seen.has(key)) {
-        seen.add(key);
-        scoreToWallclock[key] = p.wallclock;
+      const scoreKey = p.awayScore + '-' + p.homeScore;
+      const clockKey = scoreKey + '@' + p.clock;
+      // Store every score+clock combo (last play wins for same key)
+      scoreClockToWallclock[clockKey] = p.wallclock;
+      // Store first occurrence of each score state as fallback
+      if (!seenScore.has(scoreKey)) {
+        seenScore.add(scoreKey);
+        scoreToWallclock[scoreKey] = p.wallclock;
       }
     }
-    console.log('Play-by-play loaded:', Object.keys(scoreToWallclock).length, 'score states');
+    console.log('Play-by-play loaded:', Object.keys(scoreClockToWallclock).length, 'score+clock states,', Object.keys(scoreToWallclock).length, 'score states');
   })
   .catch(err => console.warn('Failed to load play-by-play:', err));
 
@@ -124,6 +128,10 @@ function fireInference(frame) {
     if (data.error) {
       el.classList.add('err');
       el.querySelector('.out').textContent = data.error;
+    } else if (data.response.trim() === 'NONE') {
+      el.querySelector('.at').textContent = ts;
+      el.querySelector('.out').textContent = '(no score visible)';
+      el.style.opacity = '0.4';
     } else {
       el.querySelector('.at').textContent = ts;
       el.querySelector('.out').textContent = data.response;
@@ -147,26 +155,35 @@ function fireInference(frame) {
 
 // --- Score & drought ---
 function updateScore(csvText, currentTs) {
-  const lines = csvText.trim().split('\n');
+  const trimmed = csvText.trim();
+  // VLM returns NONE when it can't see the scoreboard — skip entirely
+  if (trimmed === 'NONE' || trimmed === '') return;
+
+  const lines = trimmed.split('\n');
   for (const line of lines) {
     const cols = line.split(',');
-    if (cols.length >= 7) {
+    // New format: timestamp,action,team_a_score,team_b_score,game_clock,momentum_team,momentum_score,momentum_reason
+    if (cols.length >= 8) {
       const a = parseInt(cols[2]);
       const b = parseInt(cols[3]);
+      const gameClock = cols[4]?.trim() || '';
       if (!isNaN(a) && !isNaN(b)) {
         if (a > scoreA) lastScoreA_ts = currentTs;
         if (b > scoreB) lastScoreB_ts = currentTs;
         scoreA = a;
         scoreB = b;
       }
-      const mTeam = cols[4]?.trim() || 'neutral';
-      const mScore = cols[5]?.trim() || '0';
+      if (gameClock) document.getElementById('sbClock').textContent = gameClock;
+      const mTeam = cols[5]?.trim() || 'neutral';
+      const mScore = cols[6]?.trim() || '0';
       document.getElementById('sbMomentum').textContent = mTeam + ' ' + mScore;
       allRows.push(line.trim());
 
-      // Map VLM-extracted score to real wallclock via play-by-play
+      // Map VLM-extracted score+clock to real wallclock via play-by-play
+      // Try precise score+clock match first, fall back to score-only
       const scoreKey = a + '-' + b;
-      const wallclock = scoreToWallclock[scoreKey];
+      const clockKey = scoreKey + '@' + gameClock;
+      const wallclock = scoreClockToWallclock[clockKey] || scoreToWallclock[scoreKey];
       if (wallclock && window.setPlayheadByWallclock) {
         window.setPlayheadByWallclock(wallclock);
         window._lastScorePlayheadUpdate = Date.now();
@@ -186,7 +203,7 @@ function formatDrought(sec) {
 }
 
 function exportCSV() {
-  const header = 'timestamp,action,team_a_score,team_b_score,momentum_team,momentum_score,momentum_reason';
+  const header = 'timestamp,action,team_a_score,team_b_score,game_clock,momentum_team,momentum_score,momentum_reason';
   const csvData = header + '\n' + allRows.join('\n');
   const blob = new Blob([csvData], { type: 'text/csv' });
   const a = document.createElement('a');
@@ -202,6 +219,7 @@ function clearLog() {
   lastScoreA_ts = 0; lastScoreB_ts = 0;
   doneTotal = 0;
   document.getElementById('sbScore').textContent = '0 - 0';
+  document.getElementById('sbClock').textContent = '20:00';
   document.getElementById('sbMomentum').textContent = 'neutral 0';
   document.getElementById('droughtA').textContent = '0s';
   document.getElementById('droughtB').textContent = '0s';
