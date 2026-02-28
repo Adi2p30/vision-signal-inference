@@ -40,10 +40,11 @@ def serve():
         "--model", MODEL_DIR,
         "--served-model-name", MODEL_NAME,
         "--port", str(VLLM_PORT),
-        "--limit-mm-per-prompt", json.dumps({"image": 4}),
-        "--max-model-len", "4096",
+        "--limit-mm-per-prompt", json.dumps({"image": 1}),
+        "--max-model-len", "2048",
         "--tensor-parallel-size", "1",
-        "--enforce-eager",
+        "--gpu-memory-utilization", "0.95",
+        "--max-num-seqs", "32",
         "--trust-remote-code",
     ]
     subprocess.Popen(cmd)
