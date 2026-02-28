@@ -1,26 +1,28 @@
 import argparse
+import asyncio
 import json
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, FileResponse
 import uvicorn
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 app = FastAPI()
 
 # Globals set at startup
-client: OpenAI = None
+client: AsyncOpenAI = None
 model_name: str = ""
 video_path: str = ""
 
 DEFAULT_PROMPT = (
-    "Output CSV only. Columns: timestamp,action,momentum_team,momentum_score,momentum_reason\n"
-    "action: describe play in <=10 tokens.\n"
-    "momentum_team: which team has momentum (team_A/team_B/neutral).\n"
-    "momentum_score: -5 to +5 (negative=team_B, positive=team_A).\n"
-    "momentum_reason: 1-5 tokens why momentum shifted.\n"
-    "One row per frame. No headers. No explanation."
+    "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
+    "Columns: timestamp,action,team_a_score,team_b_score,momentum_team,momentum_score,momentum_reason\n"
+    "- action: <=10 tokens\n"
+    "- momentum_team: team_A/team_B/neutral\n"
+    "- momentum_score: -5 to +5\n"
+    "- momentum_reason: 1-5 tokens\n"
+    "Example: 12.0,fast break layup scored,45,42,team_A,3,quick transition"
 )
 
 HTML_PAGE = """<!DOCTYPE html>
@@ -37,7 +39,7 @@ HTML_PAGE = """<!DOCTYPE html>
   .left { flex: 1; display: flex; flex-direction: column; padding: 24px 28px; gap: 16px; min-width: 0; }
   .title { font-size: 13px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #fff; }
   video { width: 100%; flex: 1; min-height: 0; background: #000; border: 1px solid #1a1a1a; }
-  .bar { display: flex; gap: 10px; align-items: center; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .bar button {
     padding: 10px 22px; border: 1px solid #fff; background: transparent; color: #fff;
     font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
@@ -46,6 +48,16 @@ HTML_PAGE = """<!DOCTYPE html>
   .bar button:hover { background: #fff; color: #000; }
   .bar button:disabled { border-color: #333; color: #333; cursor: not-allowed; background: transparent; }
   .ts { font-size: 13px; color: #555; font-variant-numeric: tabular-nums; }
+  .auto-label {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; color: #555;
+    text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; user-select: none;
+  }
+  .auto-label input { accent-color: #fff; cursor: pointer; }
+  .auto-label.active { color: #fff; }
+  .stats {
+    font-size: 10px; color: #333; letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .stats .s-val { color: #666; }
   .prompt-row input {
     width: 100%; padding: 10px 14px; border: 1px solid #1a1a1a; background: transparent;
     color: #888; font-family: inherit; font-size: 12px; outline: none;
@@ -53,33 +65,52 @@ HTML_PAGE = """<!DOCTYPE html>
   .prompt-row input:focus { border-color: #333; color: #d4d4d4; }
   .prompt-row input::placeholder { color: #333; }
 
-  .right { width: 440px; border-left: 1px solid #1a1a1a; display: flex; flex-direction: column; }
+  .right { width: 480px; border-left: 1px solid #1a1a1a; display: flex; flex-direction: column; }
   .log-head {
     padding: 24px 20px 16px; display: flex; justify-content: space-between; align-items: center;
     border-bottom: 1px solid #1a1a1a;
   }
   .log-head span { font-size: 13px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #fff; }
+  .log-head-btns { display: flex; gap: 6px; }
   .log-head button {
     padding: 4px 10px; border: 1px solid #222; background: transparent; color: #444;
     font-family: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer;
   }
   .log-head button:hover { color: #aaa; border-color: #444; }
-  .entries { flex: 1; overflow-y: auto; padding: 16px 20px; }
+
+  .scoreboard {
+    padding: 16px 20px; border-bottom: 1px solid #1a1a1a;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px;
+  }
+  .sb-team { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #555; }
+  .sb-team.left-t { text-align: right; }
+  .sb-team.right-t { text-align: left; }
+  .sb-score { font-size: 28px; font-weight: 700; color: #fff; text-align: center; letter-spacing: 0.05em; }
+  .sb-momentum { grid-column: 1 / -1; text-align: center; font-size: 10px; color: #444; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px; }
+  .sb-momentum .val { color: #888; }
+
+  .drought {
+    padding: 10px 20px; border-bottom: 1px solid #1a1a1a; font-size: 10px;
+    color: #444; letter-spacing: 0.06em; text-transform: uppercase;
+    display: flex; justify-content: space-between;
+  }
+  .drought .d-val { color: #888; }
+
+  .entries { flex: 1; overflow-y: auto; padding: 12px 20px; }
   .entries::-webkit-scrollbar { width: 4px; }
   .entries::-webkit-scrollbar-thumb { background: #222; }
 
-  .entry { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid #111; }
+  .entry { margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid #111; }
   .entry:last-child { border-bottom: none; }
-  .entry .at { font-size: 11px; color: #444; margin-bottom: 8px; letter-spacing: 0.06em; }
-  .entry .thumbs { display: flex; gap: 4px; margin-bottom: 10px; }
-  .entry .thumbs img { height: 40px; opacity: 0.8; }
-  .entry .out { font-size: 12px; line-height: 1.7; color: #999; white-space: pre-wrap; font-variant-numeric: tabular-nums; }
+  .entry .at { font-size: 10px; color: #444; margin-bottom: 4px; letter-spacing: 0.06em; }
+  .entry .out { font-size: 11px; line-height: 1.5; color: #999; white-space: pre-wrap; font-variant-numeric: tabular-nums; }
   .entry.err .out { color: #c44; }
+  .entry.pending .out { color: #333; }
 
   .spin {
-    display: inline-block; width: 10px; height: 10px;
+    display: inline-block; width: 8px; height: 8px;
     border: 1.5px solid #333; border-top-color: #888;
-    border-radius: 50%; animation: sp 0.7s linear infinite; margin-right: 6px; vertical-align: middle;
+    border-radius: 50%; animation: sp 0.7s linear infinite; margin-right: 4px; vertical-align: middle;
   }
   @keyframes sp { to { transform: rotate(360deg); } }
 </style>
@@ -92,9 +123,16 @@ HTML_PAGE = """<!DOCTYPE html>
       <source src="/video" type="video/mp4">
     </video>
     <div class="bar">
-      <button id="captureBtn" onclick="captureAndInfer(1)">Capture 1</button>
-      <button id="capture4Btn" onclick="captureAndInfer(4)">Capture 4</button>
+      <button id="captureBtn" onclick="manualCapture()">Capture</button>
+      <label class="auto-label" id="autoLabel">
+        <input type="checkbox" id="autoCheck" onchange="toggleAuto()"> Auto
+      </label>
       <span class="ts" id="tsDisplay">0:00.0</span>
+    </div>
+    <div class="stats">
+      inflight: <span class="s-val" id="inflightCount">0</span>
+      &nbsp; done: <span class="s-val" id="doneCount">0</span>
+      &nbsp; fps: <span class="s-val" id="inferFps">0</span>
     </div>
     <div class="prompt-row">
       <input id="promptInput" type="text" placeholder="custom prompt...">
@@ -103,7 +141,20 @@ HTML_PAGE = """<!DOCTYPE html>
   <div class="right">
     <div class="log-head">
       <span>Log</span>
-      <button onclick="clearLog()">Clear</button>
+      <div class="log-head-btns">
+        <button onclick="exportCSV()">CSV</button>
+        <button onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="scoreboard">
+      <div class="sb-team left-t">Team A</div>
+      <div class="sb-score" id="sbScore">0 - 0</div>
+      <div class="sb-team right-t">Team B</div>
+      <div class="sb-momentum">momentum <span class="val" id="sbMomentum">neutral 0</span></div>
+    </div>
+    <div class="drought">
+      <span>A drought: <span class="d-val" id="droughtA">0s</span></span>
+      <span>B drought: <span class="d-val" id="droughtB">0s</span></span>
     </div>
     <div class="entries" id="logEntries"></div>
   </div>
@@ -115,6 +166,18 @@ const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const logEntries = document.getElementById('logEntries');
 const tsDisplay = document.getElementById('tsDisplay');
+const SCALE_W = 480; // downscale width for speed
+
+// State
+let autoRunning = false;
+let autoRafId = null;
+let lastCaptureTime = -1;
+let inflight = 0;
+let doneTotal = 0;
+let scoreA = 0, scoreB = 0;
+let lastScoreA_ts = 0, lastScoreB_ts = 0;
+const allRows = [];
+let fpsTimestamps = [];
 
 video.addEventListener('timeupdate', () => {
   const t = video.currentTime;
@@ -124,105 +187,160 @@ video.addEventListener('timeupdate', () => {
 });
 
 function captureFrame() {
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  ctx.drawImage(video, 0, 0);
-  return { timestamp: video.currentTime, dataUrl: canvas.toDataURL('image/jpeg', 0.85) };
+  const scale = Math.min(1, SCALE_W / video.videoWidth);
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return {
+    timestamp: video.currentTime,
+    base64: canvas.toDataURL('image/jpeg', 0.5).split(',')[1]
+  };
 }
 
-async function captureAndInfer(count) {
-  const captureBtn = document.getElementById('captureBtn');
-  const capture4Btn = document.getElementById('capture4Btn');
-  captureBtn.disabled = true;
-  capture4Btn.disabled = true;
+function updateStats() {
+  document.getElementById('inflightCount').textContent = inflight;
+  document.getElementById('doneCount').textContent = doneTotal;
+  // fps over last 10s
+  const now = performance.now();
+  fpsTimestamps = fpsTimestamps.filter(t => now - t < 10000);
+  const fps = fpsTimestamps.length > 0 ? (fpsTimestamps.length / ((now - fpsTimestamps[0]) / 1000)).toFixed(1) : '0';
+  document.getElementById('inferFps').textContent = fps;
+}
 
-  const frames = [];
-  const wasPlaying = !video.paused;
-  if (wasPlaying) video.pause();
-
-  frames.push(captureFrame());
-
-  if (count > 1) {
-    for (let i = 1; i < count; i++) {
-      video.currentTime = Math.min(video.currentTime + 1, video.duration);
-      await new Promise(r => { video.onseeked = r; });
-      frames.push(captureFrame());
-    }
+// --- Auto: capture every frame, fire concurrently ---
+function toggleAuto() {
+  const on = document.getElementById('autoCheck').checked;
+  document.getElementById('autoLabel').classList.toggle('active', on);
+  if (on) {
+    autoRunning = true;
+    lastCaptureTime = -1;
+    autoLoop();
+  } else {
+    autoRunning = false;
+    if (autoRafId) cancelAnimationFrame(autoRafId);
   }
+}
 
-  const timestamps = frames.map(f => f.timestamp.toFixed(1) + 's').join(', ');
-  const entryId = 'entry-' + Date.now();
-  const previews = frames.map(f => '<img src="' + f.dataUrl + '">').join('');
+function autoLoop() {
+  if (!autoRunning) return;
+  autoRafId = requestAnimationFrame(autoLoop);
+  if (video.paused || video.ended) return;
+  const t = video.currentTime;
+  // Capture every unique second of video
+  const tRounded = Math.floor(t);
+  if (tRounded === lastCaptureTime) return;
+  lastCaptureTime = tRounded;
+  fireInference(captureFrame());
+}
+
+function manualCapture() {
+  fireInference(captureFrame());
+}
+
+// --- Fire & forget inference ---
+function fireInference(frame) {
+  inflight++;
+  updateStats();
+
+  const ts = frame.timestamp.toFixed(1) + 's';
+  const entryId = 'e' + Date.now() + Math.random().toString(36).slice(2, 6);
 
   logEntries.insertAdjacentHTML('afterbegin',
-    '<div class="entry" id="' + entryId + '">' +
-    '  <div class="at"><span class="spin"></span>' + timestamps + '</div>' +
-    '  <div class="thumbs">' + previews + '</div>' +
-    '  <div class="out"></div>' +
-    '</div>'
+    '<div class="entry pending" id="' + entryId + '">' +
+    '<div class="at"><span class="spin"></span>' + ts + '</div>' +
+    '<div class="out">...</div></div>'
   );
 
   const prompt = document.getElementById('promptInput').value || '';
-  const b64Frames = frames.map(f => ({ timestamp: f.timestamp, base64: f.dataUrl.split(',')[1] }));
 
-  try {
-    const resp = await fetch('/infer', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ frames: b64Frames, prompt: prompt })
-    });
-
-    const entry = document.getElementById(entryId);
-    const outEl = entry.querySelector('.out');
-
-    if (!resp.ok) {
-      entry.classList.add('err');
-      entry.querySelector('.at').textContent = timestamps;
-      outEl.textContent = 'HTTP ' + resp.status;
+  fetch('/infer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ timestamp: frame.timestamp, base64: frame.base64, prompt: prompt })
+  })
+  .then(r => r.json())
+  .then(data => {
+    const el = document.getElementById(entryId);
+    if (!el) return;
+    el.classList.remove('pending');
+    if (data.error) {
+      el.classList.add('err');
+      el.querySelector('.out').textContent = data.error;
     } else {
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let text = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\\n');
-        for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const payload = line.slice(6);
-            if (payload === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(payload);
-              const delta = parsed.choices?.[0]?.delta?.content;
-              if (delta) {
-                text += delta;
-                outEl.textContent = text;
-              }
-              if (parsed.error) {
-                entry.classList.add('err');
-                outEl.textContent = parsed.error;
-              }
-            } catch {}
-          }
-        }
-      }
-      entry.querySelector('.at').textContent = timestamps;
+      el.querySelector('.at').textContent = ts;
+      el.querySelector('.out').textContent = data.response;
+      updateScore(data.response, frame.timestamp);
     }
-  } catch (err) {
-    const entry = document.getElementById(entryId);
-    entry.classList.add('err');
-    entry.querySelector('.at').textContent = timestamps;
-    entry.querySelector('.out').textContent = err.message;
-  }
-
-  captureBtn.disabled = false;
-  capture4Btn.disabled = false;
-  if (wasPlaying) video.play();
+  })
+  .catch(err => {
+    const el = document.getElementById(entryId);
+    if (!el) return;
+    el.classList.remove('pending');
+    el.classList.add('err');
+    el.querySelector('.out').textContent = err.message;
+  })
+  .finally(() => {
+    inflight--;
+    doneTotal++;
+    fpsTimestamps.push(performance.now());
+    updateStats();
+  });
 }
 
-function clearLog() { logEntries.innerHTML = ''; }
+// --- Score & drought ---
+function updateScore(csvText, currentTs) {
+  const lines = csvText.trim().split('\\n');
+  for (const line of lines) {
+    const cols = line.split(',');
+    if (cols.length >= 7) {
+      const a = parseInt(cols[2]);
+      const b = parseInt(cols[3]);
+      if (!isNaN(a) && !isNaN(b)) {
+        if (a > scoreA) lastScoreA_ts = currentTs;
+        if (b > scoreB) lastScoreB_ts = currentTs;
+        scoreA = a;
+        scoreB = b;
+      }
+      const mTeam = cols[4]?.trim() || 'neutral';
+      const mScore = cols[5]?.trim() || '0';
+      document.getElementById('sbMomentum').textContent = mTeam + ' ' + mScore;
+      allRows.push(line.trim());
+    }
+  }
+  document.getElementById('sbScore').textContent = scoreA + ' - ' + scoreB;
+  const dA = currentTs - lastScoreA_ts;
+  const dB = currentTs - lastScoreB_ts;
+  document.getElementById('droughtA').textContent = formatDrought(dA);
+  document.getElementById('droughtB').textContent = formatDrought(dB);
+}
+
+function formatDrought(sec) {
+  if (sec < 60) return sec.toFixed(0) + 's';
+  return Math.floor(sec / 60) + 'm ' + (sec % 60).toFixed(0) + 's';
+}
+
+function exportCSV() {
+  const header = 'timestamp,action,team_a_score,team_b_score,momentum_team,momentum_score,momentum_reason';
+  const csv = header + '\\n' + allRows.join('\\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'inference_log.csv';
+  a.click();
+}
+
+function clearLog() {
+  logEntries.innerHTML = '';
+  allRows.length = 0;
+  scoreA = 0; scoreB = 0;
+  lastScoreA_ts = 0; lastScoreB_ts = 0;
+  doneTotal = 0;
+  document.getElementById('sbScore').textContent = '0 - 0';
+  document.getElementById('sbMomentum').textContent = 'neutral 0';
+  document.getElementById('droughtA').textContent = '0s';
+  document.getElementById('droughtB').textContent = '0s';
+  updateStats();
+}
 </script>
 </body>
 </html>"""
@@ -241,36 +359,25 @@ async def serve_video():
 @app.post("/infer")
 async def infer(request: Request):
     body = await request.json()
-    frames = body.get("frames", [])
+    timestamp = body.get("timestamp", 0)
+    base64_img = body.get("base64", "")
     prompt = body.get("prompt", "") or DEFAULT_PROMPT
 
-    content = []
-    for f in frames:
-        content.append({"type": "text", "text": f"[{f['timestamp']:.1f}s]"})
-        content.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{f['base64']}"},
-        })
-    content.append({"type": "text", "text": prompt})
+    content = [
+        {"type": "text", "text": f"[{timestamp:.1f}s]"},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}},
+        {"type": "text", "text": prompt},
+    ]
 
-    def generate():
-        try:
-            stream = client.chat.completions.create(
-                model=model_name,
-                messages=[{"role": "user", "content": content}],
-                max_tokens=150,
-                stream=True,
-            )
-            for chunk in stream:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    payload = json.dumps({"choices": [{"delta": {"content": delta}}]})
-                    yield f"data: {payload}\n\n"
-            yield "data: [DONE]\n\n"
-        except Exception as e:
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    try:
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": content}],
+            max_tokens=60,
+        )
+        return {"response": response.choices[0].message.content}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 def main():
@@ -288,7 +395,7 @@ def main():
         raise SystemExit(f"Error: video file '{video_path}' not found")
 
     model_name = args.model
-    client = OpenAI(base_url=args.endpoint, api_key="not-needed")
+    client = AsyncOpenAI(base_url=args.endpoint, api_key="not-needed")
 
     print(f"Starting web UI at http://localhost:{args.port}")
     print(f"Video: {video_path}")
