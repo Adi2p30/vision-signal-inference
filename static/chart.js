@@ -1,12 +1,12 @@
-// Kalshi price chart — draws Kansas & Arizona lines on a canvas
+// Kalshi price chart — draws lines on a canvas for each series in the data
 (function () {
-  const KANSAS_COLOR = '#4a9eff';
-  const ARIZONA_COLOR = '#ff6b6b';
+  const SERIES_COLORS = ['#4a9eff', '#ff6b6b', '#4aff9e', '#ffdb4a', '#c74aff'];
   const GRID_COLOR = '#1a1a1a';
   const LABEL_COLOR = '#444';
   const PAD = { top: 12, right: 10, bottom: 24, left: 40 };
 
-  let chartData = [];    // [{ts: Date, kansas: number|null, arizona: number|null}]
+  let chartData = [];    // [{ts: Date, ...seriesValues}]
+  let seriesKeys = [];   // dynamic keys from the data (everything except timestamp/ts)
   let minTs = 0, maxTs = 0;
   let minPrice = 0, maxPrice = 100;
 
@@ -15,23 +15,34 @@
   const playhead = document.getElementById('chartPlayhead');
 
   // Fetch data and render
-  fetch('/kalshi-data')
+  fetch('/price-history')
     .then(r => r.json())
     .then(raw => {
-      chartData = raw.map(d => ({
-        ts: new Date(d.timestamp).getTime(),
-        kansas: d.kansas,
-        arizona: d.arizona,
-      }));
-      if (chartData.length === 0) return;
+      if (raw.length === 0) return;
+
+      // Discover series keys dynamically (all keys except timestamp)
+      seriesKeys = Object.keys(raw[0]).filter(k => k !== 'timestamp');
+
+      chartData = raw.map(d => {
+        const entry = { ts: new Date(d.timestamp).getTime() };
+        for (const key of seriesKeys) {
+          entry[key] = d[key];
+        }
+        return entry;
+      });
+
       minTs = chartData[0].ts;
       maxTs = chartData[chartData.length - 1].ts;
 
       // Compute price range from actual data
       let lo = Infinity, hi = -Infinity;
       for (const d of chartData) {
-        if (d.kansas != null) { lo = Math.min(lo, d.kansas); hi = Math.max(hi, d.kansas); }
-        if (d.arizona != null) { lo = Math.min(lo, d.arizona); hi = Math.max(hi, d.arizona); }
+        for (const key of seriesKeys) {
+          if (d[key] != null) {
+            lo = Math.min(lo, d[key]);
+            hi = Math.max(hi, d[key]);
+          }
+        }
       }
       minPrice = Math.max(0, Math.floor(lo - 2));
       maxPrice = Math.min(100, Math.ceil(hi + 2));
@@ -109,8 +120,9 @@
       chartCtx.stroke();
     }
 
-    drawLine('kansas', KANSAS_COLOR);
-    drawLine('arizona', ARIZONA_COLOR);
+    for (let i = 0; i < seriesKeys.length; i++) {
+      drawLine(seriesKeys[i], SERIES_COLORS[i % SERIES_COLORS.length]);
+    }
   }
 
   // Playhead: position by real wallclock timestamp from score matching
