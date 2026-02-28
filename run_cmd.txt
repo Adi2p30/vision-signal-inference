@@ -1,1 +1,3 @@
 python main.py --video data/ArizonavKansas.mp4 --endpoint https://adityapdev13--qwen3-vl-inference-serve-dev.modal.run/v1
+
+modal serve modal_app.py

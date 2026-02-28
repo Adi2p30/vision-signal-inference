@@ -1,0 +1,605 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frame Inference</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace; background: #000; color: #d4d4d4; height: 100vh; overflow: hidden; }
+  .layout { display: flex; height: 100vh; }
+
+  .left { flex: 1; display: flex; flex-direction: column; padding: 24px 28px; gap: 12px; min-width: 0; }
+  .title { font-size: 13px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #fff; }
+  video { width: 100%; flex: 1; min-height: 0; background: #000; border: 1px solid #1a1a1a; }
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .bar button {
+    padding: 10px 22px; border: 1px solid #fff; background: transparent; color: #fff;
+    font-family: inherit; font-size: 12px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  .bar button:hover { background: #fff; color: #000; }
+  .bar button:disabled { border-color: #333; color: #333; cursor: not-allowed; background: transparent; }
+  .ts { font-size: 13px; color: #555; font-variant-numeric: tabular-nums; }
+  .auto-label {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; color: #555;
+    text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; user-select: none;
+  }
+  .auto-label input { accent-color: #fff; cursor: pointer; }
+  .auto-label.active { color: #fff; }
+  .stats { font-size: 10px; color: #333; letter-spacing: 0.06em; text-transform: uppercase; }
+  .stats .s-val { color: #666; }
+  .prompt-row input {
+    width: 100%; padding: 10px 14px; border: 1px solid #1a1a1a; background: transparent;
+    color: #888; font-family: inherit; font-size: 12px; outline: none;
+  }
+  .prompt-row input:focus { border-color: #333; color: #d4d4d4; }
+  .prompt-row input::placeholder { color: #333; }
+
+  .chart-container { border: 1px solid #1a1a1a; position: relative; }
+  .chart-container canvas { width: 100%; height: 120px; display: block; }
+  .chart-label { position: absolute; top: 4px; left: 8px; font-size: 9px; color: #444; text-transform: uppercase; letter-spacing: 0.08em; }
+
+  .right { width: 480px; border-left: 1px solid #1a1a1a; display: flex; flex-direction: column; }
+  .log-head {
+    padding: 16px 20px 12px; display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid #1a1a1a;
+  }
+  .log-head span { font-size: 13px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: #fff; }
+  .log-head-btns { display: flex; gap: 6px; }
+  .log-head button {
+    padding: 4px 10px; border: 1px solid #222; background: transparent; color: #444;
+    font-family: inherit; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer;
+  }
+  .log-head button:hover { color: #aaa; border-color: #444; }
+
+  .scoreboard {
+    padding: 12px 20px; border-bottom: 1px solid #1a1a1a;
+    display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 6px;
+  }
+  .sb-team { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #555; }
+  .sb-team.left-t { text-align: right; }
+  .sb-team.right-t { text-align: left; }
+  .sb-score { font-size: 28px; font-weight: 700; color: #fff; text-align: center; letter-spacing: 0.05em; }
+  .sb-clock { grid-column: 1 / -1; text-align: center; font-size: 11px; color: #666; letter-spacing: 0.06em; font-weight: 700; }
+  .sb-momentum { grid-column: 1 / -1; text-align: center; font-size: 10px; color: #444; letter-spacing: 0.08em; text-transform: uppercase; }
+  .sb-momentum .val { color: #888; }
+
+  .drought {
+    padding: 8px 20px; border-bottom: 1px solid #1a1a1a; font-size: 10px;
+    color: #444; letter-spacing: 0.06em; text-transform: uppercase;
+    display: flex; justify-content: space-between;
+  }
+  .drought .d-val { color: #888; }
+
+  .entries { flex: 1; overflow-y: auto; padding: 10px 20px; }
+  .entries::-webkit-scrollbar { width: 4px; }
+  .entries::-webkit-scrollbar-thumb { background: #222; }
+
+  .entry { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px solid #111; }
+  .entry:last-child { border-bottom: none; }
+  .entry .at { font-size: 10px; color: #444; margin-bottom: 2px; letter-spacing: 0.06em; }
+  .entry .odds { font-size: 9px; color: #555; margin-bottom: 3px; letter-spacing: 0.04em; }
+  .entry .pbp { font-size: 10px; color: #6a6; margin-bottom: 3px; letter-spacing: 0.03em; }
+  .entry .pbp-score { color: #555; }
+  .entry .out { font-size: 11px; line-height: 1.5; color: #999; white-space: pre-wrap; font-variant-numeric: tabular-nums; }
+  .entry.err .out { color: #c44; }
+  .entry.pending .out { color: #333; }
+
+  .spin {
+    display: inline-block; width: 8px; height: 8px;
+    border: 1.5px solid #333; border-top-color: #888;
+    border-radius: 50%; animation: sp 0.7s linear infinite; margin-right: 4px; vertical-align: middle;
+  }
+  @keyframes sp { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="left">
+    <div class="title">ARIZ vs KU &mdash; Frame Inference</div>
+    <video id="video" controls>
+      <source src="/video" type="video/mp4">
+    </video>
+    <div class="bar">
+      <button id="captureBtn" onclick="manualCapture()">Capture</button>
+      <label class="auto-label" id="autoLabel">
+        <input type="checkbox" id="autoCheck" onchange="toggleAuto()"> Auto
+      </label>
+      <span class="ts" id="tsDisplay">0:00.0</span>
+    </div>
+    <div class="stats">
+      inflight: <span class="s-val" id="inflightCount">0</span>
+      &nbsp; done: <span class="s-val" id="doneCount">0</span>
+      &nbsp; fps: <span class="s-val" id="inferFps">0</span>
+    </div>
+    <div class="chart-container">
+      <span class="chart-label">Kalshi Odds</span>
+      <canvas id="kalshiChart" height="120"></canvas>
+    </div>
+    <div class="prompt-row">
+      <input id="promptInput" type="text" placeholder="custom prompt...">
+    </div>
+  </div>
+  <div class="right">
+    <div class="log-head">
+      <span>Log</span>
+      <div class="log-head-btns">
+        <button onclick="exportCSV()">CSV</button>
+        <button onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="scoreboard">
+      <div class="sb-team left-t" id="teamAName">ARIZ</div>
+      <div class="sb-score" id="sbScore">0 - 0</div>
+      <div class="sb-team right-t" id="teamBName">KU</div>
+      <div class="sb-clock" id="sbClock">--:-- &bull; --</div>
+      <div class="sb-momentum">momentum <span class="val" id="sbMomentum">neutral 0</span></div>
+    </div>
+    <div class="drought">
+      <span>A drought: <span class="d-val" id="droughtA">0s</span></span>
+      <span>B drought: <span class="d-val" id="droughtB">0s</span></span>
+    </div>
+    <div class="entries" id="logEntries"></div>
+  </div>
+</div>
+<canvas id="canvas" style="display:none;"></canvas>
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const logEntries = document.getElementById('logEntries');
+const tsDisplay = document.getElementById('tsDisplay');
+const SCALE_W = 480;
+
+// Clamp video to last 30 minutes
+const LAST_MINUTES = 30;
+let videoStart = 0;
+video.addEventListener('loadedmetadata', () => {
+  videoStart = Math.max(0, video.duration - LAST_MINUTES * 60);
+  video.currentTime = videoStart;
+});
+video.addEventListener('seeking', () => {
+  if (video.currentTime < videoStart) video.currentTime = videoStart;
+});
+
+// State
+let autoRunning = false;
+let autoRafId = null;
+let lastCaptureTime = -1;
+let lastSendTime = 0;
+let inflight = 0;
+let doneTotal = 0;
+let scoreA = 0, scoreB = 0;
+let lastScoreA_ts = 0, lastScoreB_ts = 0;
+const allRows = [];
+let fpsTimestamps = [];
+let frameBuffer = []; // rolling buffer for 2-frame batches
+
+// Loaded data
+let kalshiData = [];
+let playsData = [];
+let teamAName = 'ARIZ';
+let teamBName = 'KU';
+
+// --- Load data ---
+async function loadData() {
+  const [kalshiResp, playsResp] = await Promise.all([
+    fetch('/api/kalshi').then(r => r.json()),
+    fetch('/api/plays').then(r => r.json())
+  ]);
+  kalshiData = kalshiResp.data;
+  playsData = playsResp.plays;
+  teamAName = playsResp.away;
+  teamBName = playsResp.home;
+  document.getElementById('teamAName').textContent = teamAName;
+  document.getElementById('teamBName').textContent = teamBName;
+  drawKalshiChart();
+}
+loadData();
+
+// --- Kalshi chart ---
+function drawKalshiChart(markerIdx) {
+  const c = document.getElementById('kalshiChart');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = c.getBoundingClientRect();
+  c.width = rect.width * dpr;
+  c.height = 120 * dpr;
+  const cx = c.getContext('2d');
+  cx.scale(dpr, dpr);
+  const W = rect.width, H = 120;
+
+  cx.fillStyle = '#0a0a0a';
+  cx.fillRect(0, 0, W, H);
+  if (!kalshiData.length) return;
+
+  const pad = { t: 18, b: 16, l: 36, r: 12 };
+  const gW = W - pad.l - pad.r;
+  const gH = H - pad.t - pad.b;
+
+  cx.strokeStyle = '#3b82f6'; cx.lineWidth = 1.2; cx.beginPath();
+  for (let i = 0; i < kalshiData.length; i++) {
+    const x = pad.l + (i / (kalshiData.length - 1)) * gW;
+    const y = pad.t + gH - (kalshiData[i].a / 100) * gH;
+    i === 0 ? cx.moveTo(x, y) : cx.lineTo(x, y);
+  }
+  cx.stroke();
+
+  cx.strokeStyle = '#ef4444'; cx.lineWidth = 1.2; cx.beginPath();
+  for (let i = 0; i < kalshiData.length; i++) {
+    if (kalshiData[i].b === null) continue;
+    const x = pad.l + (i / (kalshiData.length - 1)) * gW;
+    const y = pad.t + gH - (kalshiData[i].b / 100) * gH;
+    i === 0 || kalshiData[i-1]?.b === null ? cx.moveTo(x, y) : cx.lineTo(x, y);
+  }
+  cx.stroke();
+
+  cx.fillStyle = '#333'; cx.font = '9px monospace'; cx.textAlign = 'right';
+  for (const v of [0, 25, 50, 75, 100]) {
+    const y = pad.t + gH - (v / 100) * gH;
+    cx.fillText(v + '', pad.l - 4, y + 3);
+    cx.strokeStyle = '#111'; cx.lineWidth = 0.5; cx.beginPath();
+    cx.moveTo(pad.l, y); cx.lineTo(W - pad.r, y); cx.stroke();
+  }
+
+  if (markerIdx !== undefined && markerIdx >= 0 && markerIdx < kalshiData.length) {
+    const x = pad.l + (markerIdx / (kalshiData.length - 1)) * gW;
+    cx.strokeStyle = '#fff'; cx.lineWidth = 1; cx.setLineDash([2, 2]); cx.beginPath();
+    cx.moveTo(x, pad.t); cx.lineTo(x, pad.t + gH); cx.stroke(); cx.setLineDash([]);
+  }
+
+  cx.font = '9px monospace'; cx.textAlign = 'left';
+  cx.fillStyle = '#3b82f6'; cx.fillText(teamAName, pad.l + 4, pad.t + 10);
+  cx.fillStyle = '#ef4444'; cx.fillText(teamBName, pad.l + 60, pad.t + 10);
+
+  // Draw time labels on x-axis
+  if (kalshiData.length > 1) {
+    cx.fillStyle = '#444'; cx.textAlign = 'center'; cx.font = '8px monospace';
+    const labelCount = Math.min(5, kalshiData.length);
+    for (let li = 0; li < labelCount; li++) {
+      const di = Math.round(li / (labelCount - 1) * (kalshiData.length - 1));
+      const ts = kalshiData[di].ts;
+      if (ts) {
+        const d = new Date(ts);
+        const lbl = d.getUTCHours().toString().padStart(2,'0') + ':' + d.getUTCMinutes().toString().padStart(2,'0');
+        const lx = pad.l + (di / (kalshiData.length - 1)) * gW;
+        cx.fillText(lbl, lx, H - 2);
+      }
+    }
+  }
+}
+
+function clockToSeconds(clockStr) {
+  if (!clockStr) return null;
+  const parts = clockStr.trim().split(':');
+  if (parts.length !== 2) return null;
+  return parseInt(parts[0]) * 60 + parseInt(parts[1]);
+}
+
+function gameProgress(clockStr, period) {
+  const secs = clockToSeconds(clockStr);
+  if (secs === null) return null;
+  const halfLen = 20 * 60;
+  const elapsed = halfLen - secs;
+  if (period && period.toLowerCase().includes('2nd')) return 0.5 + (elapsed / halfLen) * 0.5;
+  return (elapsed / halfLen) * 0.5;
+}
+
+// Map OCR clock to Kalshi array index.
+// Kalshi data is filtered to last 30 min which covers roughly the 2nd half.
+// gameProgress returns 0.5-1.0 for 2nd half — remap to span the full array.
+function clockToKalshiIdx(clockStr, period) {
+  const gp = gameProgress(clockStr, period);
+  if (gp === null || !kalshiData.length) return -1;
+  const norm = Math.max(0, Math.min(1, (gp - 0.5) * 2));
+  return Math.min(Math.round(norm * (kalshiData.length - 1)), kalshiData.length - 1);
+}
+
+function findNearestPlay(clockStr, period) {
+  if (!playsData.length || !clockStr) return null;
+  const targetSecs = clockToSeconds(clockStr);
+  if (targetSecs === null) return null;
+  const is2nd = period && period.toLowerCase().includes('2nd');
+  let best = null, bestDiff = Infinity;
+  for (const p of playsData) {
+    const pSecs = clockToSeconds(p.clock);
+    if (pSecs === null) continue;
+    const pIs2nd = p.period && p.period.toLowerCase().includes('2nd');
+    if (pIs2nd !== is2nd) continue;
+    const diff = Math.abs(pSecs - targetSecs);
+    if (diff < bestDiff) { bestDiff = diff; best = p; }
+  }
+  return best;
+}
+
+// Look up Kalshi odds + ESPN play using OCR clock, update the log entry
+function updateEntryFromOCR(entryId, ocrData) {
+  const clock = ocrData.clock;
+  const period = ocrData.period || '--';
+
+  // Look up Kalshi odds using OCR game clock
+  const oddsEl = document.getElementById(entryId + '-odds');
+  if (oddsEl && clock) {
+    const idx = clockToKalshiIdx(clock, period);
+    if (idx >= 0) {
+      const k = kalshiData[idx];
+      const aO = k.a !== null ? k.a.toFixed(0) + '\u00a2' : '--';
+      const bO = k.b !== null ? k.b.toFixed(0) + '\u00a2' : '--';
+      oddsEl.textContent = 'odds: A ' + aO + '  B ' + bO;
+    }
+  }
+
+  // Look up ESPN play-by-play using OCR clock
+  const pbpEl = document.getElementById(entryId + '-pbp');
+  if (pbpEl && clock) {
+    const play = findNearestPlay(clock, period);
+    if (play) {
+      pbpEl.innerHTML = 'ESPN: ' + play.text +
+        ' <span class="pbp-score">' + play.awayScore + '-' + play.homeScore +
+        ' ' + play.clock + ' ' + play.period + '</span>';
+    }
+  }
+}
+
+video.addEventListener('timeupdate', () => {
+  const t = video.currentTime;
+  const m = Math.floor(t / 60);
+  const s = (t % 60).toFixed(1);
+  tsDisplay.textContent = m + ':' + s.padStart(4, '0');
+});
+
+function captureFrame() {
+  const scale = Math.min(1, SCALE_W / video.videoWidth);
+  canvas.width = Math.round(video.videoWidth * scale);
+  canvas.height = Math.round(video.videoHeight * scale);
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  return {
+    timestamp: video.currentTime,
+    base64: canvas.toDataURL('image/jpeg', 0.5).split(',')[1]
+  };
+}
+
+// Capture bottom 10% height, center 90% width — the scoreboard bar region
+function captureScoreboard() {
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
+  const cropH = Math.round(vh * 0.10);
+  const cropW = Math.round(vw * 0.90);
+  const sx = Math.round((vw - cropW) / 2);
+  const sy = vh - cropH;
+  canvas.width = cropW;
+  canvas.height = cropH;
+  ctx.drawImage(video, sx, sy, cropW, cropH, 0, 0, cropW, cropH);
+  return canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+}
+
+function updateStats() {
+  document.getElementById('inflightCount').textContent = inflight;
+  document.getElementById('doneCount').textContent = doneTotal;
+  const now = performance.now();
+  fpsTimestamps = fpsTimestamps.filter(t => now - t < 10000);
+  const fps = fpsTimestamps.length > 1 ? (fpsTimestamps.length / ((now - fpsTimestamps[0]) / 1000)).toFixed(1) : '0';
+  document.getElementById('inferFps').textContent = fps;
+}
+
+// --- Auto: capture every 1s, send batch of 2 every 2s ---
+function toggleAuto() {
+  const on = document.getElementById('autoCheck').checked;
+  document.getElementById('autoLabel').classList.toggle('active', on);
+  if (on) {
+    autoRunning = true;
+    lastCaptureTime = -1;
+    lastSendTime = 0;
+    frameBuffer = [];
+    autoLoop();
+  } else {
+    autoRunning = false;
+    if (autoRafId) cancelAnimationFrame(autoRafId);
+  }
+}
+
+function autoLoop() {
+  if (!autoRunning) return;
+  autoRafId = requestAnimationFrame(autoLoop);
+  if (video.paused || video.ended) return;
+
+  const tRounded = Math.floor(video.currentTime);
+  if (tRounded === lastCaptureTime) return;
+  lastCaptureTime = tRounded;
+
+  // Buffer frames
+  frameBuffer.push(captureFrame());
+  if (frameBuffer.length > 2) frameBuffer.shift();
+
+  // Send every 2 seconds when we have 2 frames
+  const now = performance.now();
+  if (frameBuffer.length >= 2 && now - lastSendTime >= 2000) {
+    const batch = frameBuffer.splice(0, 2);
+    lastSendTime = now;
+    fireInference(batch);
+  }
+}
+
+function manualCapture() {
+  fireInference([captureFrame()]);
+}
+
+// --- Fire & forget: OCR (scoreboard) + VLM (momentum) in parallel ---
+function fireInference(frames) {
+  inflight++;
+  updateStats();
+
+  const timestamps = frames.map(f => f.timestamp.toFixed(1) + 's').join(', ');
+  const lastTs = frames[frames.length - 1].timestamp;
+  const entryId = 'e' + Date.now() + Math.random().toString(36).slice(2, 6);
+
+  // Capture scoreboard crop for OCR before canvas is reused
+  const scoreboardB64 = captureScoreboard();
+
+  // Create log entry — odds and play-by-play will be filled in by OCR callback
+  logEntries.insertAdjacentHTML('afterbegin',
+    '<div class="entry pending" id="' + entryId + '">' +
+    '<div class="at"><span class="spin"></span>' + timestamps + '</div>' +
+    '<div class="odds" id="' + entryId + '-odds"></div>' +
+    '<div class="pbp" id="' + entryId + '-pbp"></div>' +
+    '<div class="out">...</div></div>'
+  );
+
+  const prompt = document.getElementById('promptInput').value || '';
+  const payload = frames.map(f => ({ timestamp: f.timestamp, base64: f.base64 }));
+
+  // --- OCR request (fast, scoreboard only) ---
+  const ocrPromise = fetch('/ocr', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ image: scoreboardB64 })
+  })
+  .then(r => r.json())
+  .then(ocrData => {
+    if (!ocrData.error && ocrData.clock) {
+      updateScoreboardFromOCR(ocrData, lastTs);
+      updateEntryFromOCR(entryId, ocrData);
+    }
+    // No clock = no scoreboard visible — skip UI updates
+  })
+  .catch(err => console.warn('OCR error:', err));
+
+  // --- VLM request (slower, action + momentum) ---
+  const vlmPromise = fetch('/infer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ frames: payload, prompt: prompt })
+  })
+  .then(r => r.json())
+  .then(data => {
+    const el = document.getElementById(entryId);
+    if (!el) return;
+    el.classList.remove('pending');
+    if (data.error) {
+      el.classList.add('err');
+      el.querySelector('.out').textContent = data.error;
+    } else {
+      el.querySelector('.out').textContent = data.response;
+      const parsed = parseVLMRow(data.response);
+      if (parsed) updateMomentum(parsed);
+    }
+    el.querySelector('.at').textContent = timestamps;
+  })
+  .catch(err => {
+    const el = document.getElementById(entryId);
+    if (!el) return;
+    el.classList.remove('pending');
+    el.classList.add('err');
+    el.querySelector('.out').textContent = err.message;
+  });
+
+  // Update stats when both complete
+  Promise.allSettled([ocrPromise, vlmPromise]).then(() => {
+    inflight--;
+    doneTotal++;
+    fpsTimestamps.push(performance.now());
+    updateStats();
+  });
+}
+
+// VLM only returns: action,momentum_team,momentum_score,momentum_reason
+function parseVLMRow(text) {
+  const line = text.trim().split('\n')[0];
+  const cols = line.split(',');
+  if (cols.length < 4) return null;
+  return {
+    action: cols[0]?.trim(),
+    mTeam: cols[1]?.trim(),
+    mScore: cols[2]?.trim(),
+    mReason: cols[3]?.trim()
+  };
+}
+
+// Score + clock from play-by-play data (not VLM)
+function updateScoreFromPlay(play, videoTs) {
+  const a = play.awayScore;
+  const b = play.homeScore;
+  if (a > scoreA) lastScoreA_ts = videoTs;
+  if (b > scoreB) lastScoreB_ts = videoTs;
+  scoreA = a;
+  scoreB = b;
+
+  document.getElementById('sbScore').textContent = scoreA + ' - ' + scoreB;
+  document.getElementById('sbClock').textContent = play.clock + ' \u2022 ' + play.period;
+
+  const dA = videoTs - lastScoreA_ts;
+  const dB = videoTs - lastScoreB_ts;
+  document.getElementById('droughtA').textContent = formatDrought(dA);
+  document.getElementById('droughtB').textContent = formatDrought(dB);
+}
+
+// Score + clock from OCR (primary source)
+function updateScoreboardFromOCR(ocrData, videoTs) {
+  if (ocrData.score_a !== null && ocrData.score_b !== null) {
+    const a = ocrData.score_a;
+    const b = ocrData.score_b;
+    if (a > scoreA) lastScoreA_ts = videoTs;
+    if (b > scoreB) lastScoreB_ts = videoTs;
+    scoreA = a;
+    scoreB = b;
+    document.getElementById('sbScore').textContent = scoreA + ' - ' + scoreB;
+  }
+
+  if (ocrData.clock) {
+    const periodStr = ocrData.period || '--';
+    document.getElementById('sbClock').textContent = ocrData.clock + ' \u2022 ' + periodStr;
+
+    // Update Kalshi chart marker from OCR-read clock
+    const idx = clockToKalshiIdx(ocrData.clock, periodStr);
+    if (idx >= 0) drawKalshiChart(idx);
+  }
+
+  const dA = videoTs - lastScoreA_ts;
+  const dB = videoTs - lastScoreB_ts;
+  document.getElementById('droughtA').textContent = formatDrought(dA);
+  document.getElementById('droughtB').textContent = formatDrought(dB);
+}
+
+// Momentum from VLM
+function updateMomentum(parsed) {
+  if (parsed.mTeam) {
+    document.getElementById('sbMomentum').textContent = parsed.mTeam + ' ' + (parsed.mScore || '0');
+  }
+  allRows.push([parsed.action, parsed.mTeam, parsed.mScore, parsed.mReason].join(','));
+}
+
+function formatDrought(sec) {
+  if (sec < 60) return sec.toFixed(0) + 's';
+  return Math.floor(sec / 60) + 'm ' + (sec % 60).toFixed(0) + 's';
+}
+
+function exportCSV() {
+  const header = 'action,momentum_team,momentum_score,momentum_reason';
+  const csv = header + '\n' + allRows.join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'inference_log.csv';
+  a.click();
+}
+
+function clearLog() {
+  logEntries.innerHTML = '';
+  allRows.length = 0;
+  scoreA = 0; scoreB = 0;
+  lastScoreA_ts = 0; lastScoreB_ts = 0;
+  doneTotal = 0;
+  frameBuffer = [];
+  document.getElementById('sbScore').textContent = '0 - 0';
+  document.getElementById('sbClock').textContent = '--:-- \u2022 --';
+  document.getElementById('sbMomentum').textContent = 'neutral 0';
+  document.getElementById('droughtA').textContent = '0s';
+  document.getElementById('droughtB').textContent = '0s';
+  drawKalshiChart();
+  updateStats();
+}
+
+window.addEventListener('resize', () => drawKalshiChart());
+</script>
+</body>
+</html>
