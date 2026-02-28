@@ -29,6 +29,7 @@ vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
     volumes={"/root/.cache/vllm": vllm_cache_vol},
     timeout=1800,
     scaledown_window=300,
+    min_containers=1
 )
 @modal.web_server(port=VLLM_PORT, startup_timeout=600)
 def serve():

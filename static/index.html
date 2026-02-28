@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Frame Inference</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="left">
+    <div class="title">Frame Inference</div>
+    <video id="video" controls>
+      <source src="/video" type="video/mp4">
+    </video>
+    <div class="chart-wrap">
+      <canvas id="kalshiChart"></canvas>
+      <div class="chart-legend">
+        <div class="leg"><span class="swatch" style="background:#4a9eff"></span><span style="color:#4a9eff">Kansas</span></div>
+        <div class="leg"><span class="swatch" style="background:#ff6b6b"></span><span style="color:#ff6b6b">Arizona</span></div>
+      </div>
+      <div class="chart-playhead" id="chartPlayhead"></div>
+    </div>
+    <div class="bar">
+      <button id="captureBtn" onclick="manualCapture()">Capture</button>
+      <label class="auto-label" id="autoLabel">
+        <input type="checkbox" id="autoCheck" onchange="toggleAuto()"> Auto
+      </label>
+      <span class="ts" id="tsDisplay">0:00.0</span>
+    </div>
+    <div class="stats">
+      inflight: <span class="s-val" id="inflightCount">0</span>
+      &nbsp; done: <span class="s-val" id="doneCount">0</span>
+      &nbsp; fps: <span class="s-val" id="inferFps">0</span>
+    </div>
+    <div class="prompt-row">
+      <input id="promptInput" type="text" placeholder="custom prompt...">
+    </div>
+  </div>
+  <div class="right">
+    <div class="log-head">
+      <span>Log</span>
+      <div class="log-head-btns">
+        <button onclick="exportCSV()">CSV</button>
+        <button onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="scoreboard">
+      <div class="sb-team left-t">Team A</div>
+      <div class="sb-score" id="sbScore">0 - 0</div>
+      <div class="sb-team right-t">Team B</div>
+      <div class="sb-momentum">momentum <span class="val" id="sbMomentum">neutral 0</span></div>
+    </div>
+    <div class="drought">
+      <span>A drought: <span class="d-val" id="droughtA">0s</span></span>
+      <span>B drought: <span class="d-val" id="droughtB">0s</span></span>
+    </div>
+    <div class="entries" id="logEntries"></div>
+  </div>
+</div>
+<canvas id="canvas" style="display:none;"></canvas>
+<script src="/static/app.js"></script>
+<script src="/static/chart.js"></script>
+</body>
+</html>
