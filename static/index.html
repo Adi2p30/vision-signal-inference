@@ -13,14 +13,6 @@
     <video id="video" controls>
       <source src="/video" type="video/mp4">
     </video>
-    <div class="chart-wrap">
-      <canvas id="kalshiChart"></canvas>
-      <div class="chart-legend">
-        <div class="leg"><span class="swatch" style="background:#4a9eff"></span><span style="color:#4a9eff">Kansas</span></div>
-        <div class="leg"><span class="swatch" style="background:#ff6b6b"></span><span style="color:#ff6b6b">Arizona</span></div>
-      </div>
-      <div class="chart-playhead" id="chartPlayhead"></div>
-    </div>
     <div class="bar">
       <button id="captureBtn" onclick="manualCapture()">Capture</button>
       <label class="auto-label" id="autoLabel">
@@ -35,6 +27,23 @@
     </div>
     <div class="prompt-row">
       <input id="promptInput" type="text" placeholder="custom prompt...">
+    </div>
+    <div class="charts-scroll">
+      <div class="chart-wrap" style="margin-bottom:0">
+        <canvas id="candlestickChart" style="width:100%;height:140px"></canvas>
+        <div class="chart-legend">
+          <div class="leg"><span class="swatch" style="background:#4a9eff"></span><span style="color:#4a9eff">Yes Bid</span></div>
+          <div class="leg"><span class="swatch" style="background:#ff6b6b"></span><span style="color:#ff6b6b">Yes Ask</span></div>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="kalshiChart"></canvas>
+        <div class="chart-legend">
+          <div class="leg"><span class="swatch" style="background:#4a9eff"></span><span style="color:#4a9eff">Kansas</span></div>
+          <div class="leg"><span class="swatch" style="background:#ff6b6b"></span><span style="color:#ff6b6b">Arizona</span></div>
+        </div>
+        <div class="chart-playhead" id="chartPlayhead"></div>
+      </div>
     </div>
   </div>
   <div class="right">
@@ -64,5 +73,6 @@
 <canvas id="canvas" style="display:none;"></canvas>
 <script src="/static/app.js"></script>
 <script src="/static/chart.js"></script>
+<script src="/static/candlestick-chart.js"></script>
 </body>
 </html>

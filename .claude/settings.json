@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"from datetime import datetime; print\\(int\\(datetime.fromisoformat\\(''2026-02-10T01:13:00+00:00''\\).timestamp\\(\\)\\)\\)\")",
+      "Bash(python3 -c \":*)"
+    ]
+  }
+}
