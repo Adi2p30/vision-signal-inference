@@ -6,19 +6,19 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from openai import AsyncOpenAI
 
 app = FastAPI()
 
 # Globals set at startup
-client: AsyncOpenAI = None
-ocr_http: httpx.AsyncClient = None
-ocr_url: str = ""
+vllm_http: httpx.AsyncClient = None
+vllm_endpoint: str = ""
 model_name: str = ""
 video_path: str = ""
 summary_data: dict = {}
 kalshi_data: list = []
 html_content: str = ""
+scoreboard_http: httpx.AsyncClient = None
+scoreboard_url: str = ""
 
 DEFAULT_PROMPT = (
     "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
@@ -82,6 +82,13 @@ async def get_plays():
     return {"plays": [], "away": "TEAM A", "home": "TEAM B"}
 
 
+@app.post("/scoreboard")
+async def scoreboard_proxy(request: Request):
+    body = await request.body()
+    resp = await scoreboard_http.post(scoreboard_url, content=body, headers={"Content-Type": "application/json"})
+    return resp.json()
+
+
 @app.post("/infer")
 async def infer(request: Request):
     body = await request.json()
@@ -100,29 +107,21 @@ async def infer(request: Request):
     content.append({"type": "text", "text": prompt})
 
     try:
-        response = await client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": content}],
-            max_tokens=60,
+        resp = await vllm_http.post(
+            f"{vllm_endpoint}/chat/completions",
+            json={
+                "model": model_name,
+                "messages": [{"role": "user", "content": content}],
+                "max_tokens": 60,
+            },
         )
-        return {"response": response.choices[0].message.content}
+        data = resp.json()
+        return {"response": data["choices"][0]["message"]["content"]}
     except Exception as e:
         return {"error": str(e)}
 
 
-@app.post("/ocr")
-async def ocr(request: Request):
-    body = await request.json()
-    image_b64 = body.get("image", "")
-    try:
-        resp = await ocr_http.post(ocr_url, json={"image": image_b64})
-        return resp.json()
-    except Exception as e:
-        return {"error": str(e)}
-
-
-
-def load_kalshi_csv(path: str, last_minutes: int = 30) -> list:
+def load_kalshi_csv(path: str, start_offset: int = 180, end_offset: int = 0) -> list:
     from datetime import datetime, timedelta
 
     rows = []
@@ -142,14 +141,15 @@ def load_kalshi_csv(path: str, last_minutes: int = 30) -> list:
                 }
             )
 
-    # Filter to last N minutes of data
-    if rows and last_minutes > 0:
+    # Filter to window: n-start_offset to n-end_offset minutes from end
+    if rows:
         last_ts = datetime.fromisoformat(rows[-1]["ts"].replace("Z", "+00:00"))
-        cutoff = last_ts - timedelta(minutes=last_minutes)
+        window_start = last_ts - timedelta(minutes=start_offset)
+        window_end = last_ts - timedelta(minutes=end_offset)
         rows = [
             r
             for r in rows
-            if datetime.fromisoformat(r["ts"].replace("Z", "+00:00")) >= cutoff
+            if window_start <= datetime.fromisoformat(r["ts"].replace("Z", "+00:00")) <= window_end
         ]
 
     return rows
@@ -158,16 +158,18 @@ def load_kalshi_csv(path: str, last_minutes: int = 30) -> list:
 def main():
     import json as json_mod
 
-    global client, ocr_http, ocr_url, model_name, video_path
+    global vllm_http, vllm_endpoint, model_name, video_path
     global summary_data, kalshi_data, html_content
+    global scoreboard_http, scoreboard_url
 
     parser = argparse.ArgumentParser(description="Video Frame Inference Web UI")
     parser.add_argument("--video", required=True, help="Path to input video file")
-    parser.add_argument("--endpoint", required=True, help="Modal endpoint URL (e.g. https://...modal.run/v1)")
+    parser.add_argument("--endpoint", required=True, help="vLLM Modal endpoint URL (e.g. https://...modal.run/v1)")
+    parser.add_argument("--scoreboard-endpoint", required=True, help="Scoreboard Modal endpoint URL (e.g. https://...modal.run/scoreboard)")
     parser.add_argument("--model", default="Qwen/Qwen3-VL-8B-Instruct")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--summary", default="data/summary.json")
-    parser.add_argument("--kalshi", default="data/kalshi_price_history.csv")
+    parser.add_argument("--kalshi", default="data/arizonavkansas_kalshi.csv")
     args = parser.parse_args()
 
     video_path = str(Path(args.video).resolve())
@@ -190,19 +192,16 @@ def main():
         print(f"Loaded Kalshi: {len(kalshi_data)} price points")
 
     model_name = args.model
-    client = AsyncOpenAI(base_url=args.endpoint, api_key="not-needed")
+    vllm_endpoint = args.endpoint.rstrip("/")
+    vllm_http = httpx.AsyncClient(timeout=120.0)
 
-    # OCR endpoint — same Modal instance, /ocr path
-    endpoint_base = args.endpoint.rstrip("/")
-    if endpoint_base.endswith("/v1"):
-        endpoint_base = endpoint_base[:-3]
-    ocr_url = f"{endpoint_base}/ocr"
-    ocr_http = httpx.AsyncClient(timeout=10.0)
-    print(f"OCR endpoint: {ocr_url}")
+    scoreboard_url = args.scoreboard_endpoint
+    scoreboard_http = httpx.AsyncClient(timeout=30.0)
 
     print(f"Starting web UI at http://localhost:{args.port}")
     print(f"Video: {video_path}")
     print(f"Endpoint: {args.endpoint}")
+    print(f"Scoreboard: {scoreboard_url}")
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 
 

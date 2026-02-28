@@ -1,75 +1,139 @@
 import modal
+from pathlib import Path
 
 MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
-MODEL_DIR = "/model"
+SCOREBOARD_MODEL_NAME = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+MODELS_DIR = Path("/models")
+VLLM_MODEL_DIR = MODELS_DIR / "vllm"
+SCOREBOARD_MODEL_DIR = MODELS_DIR / "scoreboard"
 VLLM_PORT = 8001  # internal port for vLLM subprocess
 
+# ---------------------------------------------------------------------------
+# Persistent volume for model weights — downloaded once, reused across deploys
+# ---------------------------------------------------------------------------
+model_weights_vol = modal.Volume.from_name("model-weights-vol", create_if_missing=True)
 
-def download_model():
-    from huggingface_hub import snapshot_download
-    snapshot_download(MODEL_NAME, local_dir=MODEL_DIR)
+# Lightweight image for downloading weights (no GPU needed)
+download_image = (
+    modal.Image.debian_slim()
+    .pip_install("huggingface_hub")
+    .env({"HF_XET_HIGH_PERFORMANCE": "1"})
+)
 
+# ---------------------------------------------------------------------------
+# Serving images — pip layers cached independently, no model weights baked in
+# ---------------------------------------------------------------------------
+_cuda_base = modal.Image.from_registry(
+    "nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12"
+)
 
-image = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12"
-    )
-    .apt_install("libgl1", "libglib2.0-0")
-    .pip_install(
-        "vllm>=0.13.0",
-        "huggingface-hub",
-        "opencv-python-headless",
-        "Pillow",
-        "numpy",
-        "httpx",
-        "fastapi",
-    )
-    .pip_install("easyocr", extra_options="--no-deps")
-    .pip_install("python-bidi", "scikit-image")
-    .run_function(download_model)
+vllm_image = _cuda_base.pip_install(
+    "vllm>=0.13.0",
+    "huggingface-hub",
+    "httpx",
+    "fastapi",
+)
+
+scoreboard_image = _cuda_base.pip_install(
+    "transformers",
+    "torch",
+    "accelerate",
+    "num2words",
+    "Pillow",
+    "numpy",
+    "huggingface-hub",
+    "httpx",
+    "fastapi",
 )
 
 app = modal.App("qwen3-vl-inference")
 
-vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
+
+# ---------------------------------------------------------------------------
+# Download functions — run once to populate the volume
+#   modal run modal_app.py
+# ---------------------------------------------------------------------------
+@app.function(
+    volumes={MODELS_DIR.as_posix(): model_weights_vol},
+    image=download_image,
+)
+def download_vllm_model():
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(MODEL_NAME, local_dir=str(VLLM_MODEL_DIR))
+    print(f"Downloaded {MODEL_NAME} to {VLLM_MODEL_DIR}")
 
 
 @app.function(
-    image=image,
+    volumes={MODELS_DIR.as_posix(): model_weights_vol},
+    image=download_image,
+)
+def download_scoreboard_model():
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(SCOREBOARD_MODEL_NAME, local_dir=str(SCOREBOARD_MODEL_DIR))
+    print(f"Downloaded {SCOREBOARD_MODEL_NAME} to {SCOREBOARD_MODEL_DIR}")
+
+
+@app.local_entrypoint()
+def download_models():
+    """Download both models into the volume. Run: modal run modal_app.py"""
+    download_vllm_model.remote()
+    download_scoreboard_model.remote()
+
+
+# ---------------------------------------------------------------------------
+# vLLM function — H100, proxies /v1/* to the vLLM subprocess
+# ---------------------------------------------------------------------------
+@app.function(
+    image=vllm_image,
     gpu="H100",
-    volumes={"/root/.cache/vllm": vllm_cache_vol},
+    volumes={MODELS_DIR.as_posix(): model_weights_vol},
     timeout=1800,
     scaledown_window=300,
+    min_containers=1,
     max_containers=2,
 )
 @modal.asgi_app()
-def serve():
-    import base64
-    import io
+def serve_vllm():
     import json
-    import re
+    import os
     import socket
     import subprocess
     import time
 
     import httpx
-    import numpy as np
     from fastapi import FastAPI, Request
     from fastapi.responses import Response
-    from PIL import Image
-    import easyocr
 
-    # --- Start vLLM on internal port ---
+    # Ensure model weights are in the volume (downloads on first start)
+    if not os.path.exists(str(VLLM_MODEL_DIR / "config.json")):
+        print(f"Model not found in volume, downloading {MODEL_NAME}...")
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(MODEL_NAME, local_dir=str(VLLM_MODEL_DIR))
+        print(f"Downloaded {MODEL_NAME} to {VLLM_MODEL_DIR}")
+
     cmd = [
-        "python", "-m", "vllm.entrypoints.openai.api_server",
-        "--model", MODEL_DIR,
-        "--served-model-name", MODEL_NAME,
-        "--port", str(VLLM_PORT),
-        "--limit-mm-per-prompt", json.dumps({"image": 2}),
-        "--max-model-len", "2048",
-        "--tensor-parallel-size", "1",
-        "--gpu-memory-utilization", "0.95",
-        "--max-num-seqs", "32",
+        "python",
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        str(VLLM_MODEL_DIR),
+        "--served-model-name",
+        MODEL_NAME,
+        "--port",
+        str(VLLM_PORT),
+        "--limit-mm-per-prompt",
+        json.dumps({"image": 2}),
+        "--max-model-len",
+        "2048",
+        "--tensor-parallel-size",
+        "1",
+        "--gpu-memory-utilization",
+        "0.85",
+        "--max-num-seqs",
+        "32",
         "--trust-remote-code",
     ]
     subprocess.Popen(cmd)
@@ -83,87 +147,19 @@ def serve():
         except (ConnectionRefusedError, OSError):
             time.sleep(2)
 
-    # --- Init ---
     vllm_client = httpx.AsyncClient(
         base_url=f"http://localhost:{VLLM_PORT}", timeout=120.0
     )
-    ocr_engine = easyocr.Reader(["en"], gpu=True)
-
     web_app = FastAPI()
 
-    # --- OCR endpoint ---
-    @web_app.post("/ocr")
-    async def ocr_endpoint(data: dict):
-        t0 = time.perf_counter()
-
-        img_b64 = data.get("image", "")
-        img_bytes = base64.b64decode(img_b64)
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-
-        result = ocr_engine.readtext(np.array(img))
-
-        clock = None
-        period = None
-        score_candidates = []  # (value, center_x, box_area)
-        all_text = []
-
-        for box, text, _conf in result:
-            all_text.append(text)
-
-            # Clock: M:SS or MM:SS
-            cm = re.search(r"(\d{1,2}:\d{2})", text)
-            if cm and not clock:
-                clock = cm.group(1)
-                continue
-
-            # Period (may include shot clock like "25 2nd")
-            if re.search(r"(1st|2nd|1ST|2ND|OT|HALF|Half)", text):
-                period = text.strip()
-                continue
-
-            # Standalone 2-3 digit numbers as score candidates
-            text_clean = text.strip()
-            if re.fullmatch(r"\d{2,3}", text_clean):
-                val = int(text_clean)
-                if val <= 200:
-                    xs = [p[0] for p in box]
-                    ys = [p[1] for p in box]
-                    area = (max(xs) - min(xs)) * (max(ys) - min(ys))
-                    cx = sum(xs) / len(xs)
-                    score_candidates.append((val, cx, area))
-
-        # No clock means no scoreboard visible
-        score_a = None
-        score_b = None
-        if clock and len(score_candidates) >= 2:
-            # Pick the two largest-area standalone numbers (game scores
-            # are displayed in the biggest font on the scoreboard)
-            score_candidates.sort(key=lambda x: -x[2])
-            top2 = sorted(score_candidates[:2], key=lambda x: x[1])
-            score_a = top2[0][0]  # left
-            score_b = top2[1][0]  # right
-        elif clock and len(score_candidates) == 1:
-            score_a = score_candidates[0][0]
-
-        elapsed_ms = round((time.perf_counter() - t0) * 1000)
-
-        return {
-            "clock": clock,
-            "period": period,
-            "score_a": score_a,
-            "score_b": score_b,
-            "raw": all_text,
-            "elapsed_ms": elapsed_ms,
-        }
-
-    # --- Proxy /v1/* to vLLM subprocess ---
     @web_app.api_route(
         "/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"]
     )
     async def proxy_vllm(request: Request, path: str):
         body = await request.body()
         headers = {
-            k: v for k, v in request.headers.items()
+            k: v
+            for k, v in request.headers.items()
             if k.lower() not in ("host", "content-length", "transfer-encoding")
         }
         resp = await vllm_client.request(
@@ -173,7 +169,8 @@ def serve():
             headers=headers,
         )
         resp_headers = {
-            k: v for k, v in resp.headers.items()
+            k: v
+            for k, v in resp.headers.items()
             if k.lower() not in ("transfer-encoding", "content-encoding")
         }
         return Response(
@@ -185,7 +182,104 @@ def serve():
     return web_app
 
 
-@app.local_entrypoint()
-def health_check():
-    print(f"Deploying {MODEL_NAME}...")
-    print("Use `modal serve modal_app.py` for dev or `modal deploy modal_app.py` for prod.")
+# ---------------------------------------------------------------------------
+# Scoreboard function — L4, loads SmolVLM2 into VRAM, exposes /scoreboard
+# ---------------------------------------------------------------------------
+@app.function(
+    image=scoreboard_image,
+    gpu="L4",
+    volumes={MODELS_DIR.as_posix(): model_weights_vol},
+    timeout=300,
+    scaledown_window=300,
+    min_containers=1,
+    max_containers=2,
+)
+@modal.asgi_app()
+def serve_scoreboard():
+    import asyncio
+    import base64
+    import io
+    import os
+    import re
+
+    import torch
+    from fastapi import FastAPI, Request
+    from fastapi.responses import JSONResponse
+    from PIL import Image
+    from transformers import AutoModelForImageTextToText, AutoProcessor
+
+    # Ensure model weights are in the volume (downloads on first start)
+    if not os.path.exists(str(SCOREBOARD_MODEL_DIR / "config.json")):
+        print(f"Model not found in volume, downloading {SCOREBOARD_MODEL_NAME}...")
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(SCOREBOARD_MODEL_NAME, local_dir=str(SCOREBOARD_MODEL_DIR))
+        print(f"Downloaded {SCOREBOARD_MODEL_NAME} to {SCOREBOARD_MODEL_DIR}")
+
+    print("Loading SmolVLM2 scoreboard model...")
+    sb_processor = AutoProcessor.from_pretrained(str(SCOREBOARD_MODEL_DIR), local_files_only=True)
+    sb_model = AutoModelForImageTextToText.from_pretrained(
+        str(SCOREBOARD_MODEL_DIR),
+        dtype=torch.float16,
+        device_map="cuda",
+        local_files_only=True,
+    )
+    sb_model.eval()
+    print("SmolVLM2 scoreboard model loaded.")
+
+    web_app = FastAPI()
+
+    def _run_scoreboard(image_b64: str) -> dict:
+        img_bytes = base64.b64decode(image_b64)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+
+        prompt_text = (
+            "Read the scoreboard. Output ONLY one CSV row: score_a,score_b,clock,half\n"
+            "Example: 64,67,8:13,2nd"
+        )
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": img},
+                    {"type": "text", "text": prompt_text},
+                ],
+            }
+        ]
+        inputs = sb_processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(sb_model.device)
+
+        with torch.no_grad():
+            output_ids = sb_model.generate(**inputs, max_new_tokens=30)
+
+        generated_ids = output_ids[0, inputs["input_ids"].shape[1] :]
+        raw = sb_processor.decode(generated_ids, skip_special_tokens=True).strip()
+
+        result = {"score_a": "", "score_b": "", "clock": "", "half": "", "raw": raw}
+        match = re.match(r"(\d+)\s*,\s*(\d+)\s*,\s*([\d:]+)\s*,\s*(.+)", raw)
+        if match:
+            result["score_a"] = match.group(1)
+            result["score_b"] = match.group(2)
+            result["clock"] = match.group(3)
+            result["half"] = match.group(4).strip()
+
+        return result
+
+    @web_app.post("/scoreboard")
+    async def scoreboard(request: Request):
+        body = await request.json()
+        image_b64 = body.get("image", "")
+        if not image_b64:
+            return JSONResponse({"error": "No image provided"}, status_code=400)
+        try:
+            result = await asyncio.to_thread(_run_scoreboard, image_b64)
+            return result
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+
+    return web_app

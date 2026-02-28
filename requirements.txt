@@ -1,5 +1,4 @@
 modal
-openai
 opencv-python
 fastapi
 uvicorn
