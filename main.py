@@ -18,12 +18,14 @@ video_path: str = ""
 
 DEFAULT_PROMPT = (
     "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
-    "Columns: timestamp,action,team_a_score,team_b_score,momentum_team,momentum_score,momentum_reason\n"
+    "If you cannot see the scoreboard or game clock clearly, output exactly: NONE\n"
+    "Columns: timestamp,action,team_a_score,team_b_score,game_clock,momentum_team,momentum_score,momentum_reason\n"
     "- action: <=10 tokens\n"
+    "- game_clock: countdown timer shown on screen, format MM:SS (e.g. 14:32, 03:07)\n"
     "- momentum_team: team_A/team_B/neutral\n"
     "- momentum_score: -5 to +5\n"
     "- momentum_reason: 1-5 tokens\n"
-    "Example: 12.0,fast break layup scored,45,42,team_A,3,quick transition"
+    "Example: 12.0,fast break layup scored,45,42,14:32,team_A,3,quick transition"
 )
 
 
@@ -50,6 +52,8 @@ async def play_by_play():
         plays.append({
             "awayScore": p["awayScore"],
             "homeScore": p["homeScore"],
+            "clock": p["clock"]["displayValue"],
+            "period": p["period"]["number"],
             "wallclock": p["wallclock"],
         })
     return JSONResponse(plays)

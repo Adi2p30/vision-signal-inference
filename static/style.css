@@ -59,7 +59,9 @@ video { width: 100%; flex: 0 0 auto; max-height: 50vh; background: #000; border:
 .sb-team { font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: #555; }
 .sb-team.left-t { text-align: right; }
 .sb-team.right-t { text-align: left; }
-.sb-score { font-size: 28px; font-weight: 700; color: #fff; text-align: center; letter-spacing: 0.05em; }
+.sb-center { text-align: center; }
+.sb-score { font-size: 28px; font-weight: 700; color: #fff; letter-spacing: 0.05em; }
+.sb-clock { font-size: 11px; color: #555; letter-spacing: 0.08em; font-variant-numeric: tabular-nums; margin-top: 2px; }
 .sb-momentum { grid-column: 1 / -1; text-align: center; font-size: 10px; color: #444; letter-spacing: 0.08em; text-transform: uppercase; margin-top: 2px; }
 .sb-momentum .val { color: #888; }
 

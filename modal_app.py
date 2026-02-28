@@ -4,29 +4,23 @@ MODEL_NAME = "Qwen/Qwen3-VL-8B-Instruct"
 MODEL_DIR = "/model"
 VLLM_PORT = 8000
 
-
-def download_model():
-    from huggingface_hub import snapshot_download
-    snapshot_download(MODEL_NAME, local_dir=MODEL_DIR)
-
-
 vllm_image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12"
     )
     .pip_install("vllm>=0.13.0", "huggingface-hub[hf_xet]")
-    .run_function(download_model)
 )
 
 app = modal.App("qwen3-vl-inference")
 
+model_vol = modal.Volume.from_name("llm-weights", create_if_missing=True)
 vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 
 
 @app.function(
     image=vllm_image,
     gpu="H100",
-    volumes={"/root/.cache/vllm": vllm_cache_vol},
+    volumes={MODEL_DIR: model_vol, "/root/.cache/vllm": vllm_cache_vol},
     timeout=1800,
     scaledown_window=300,
     min_containers=1
@@ -34,7 +28,14 @@ vllm_cache_vol = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 @modal.web_server(port=VLLM_PORT, startup_timeout=600)
 def serve():
     import json
+    import os
     import subprocess
+
+    from huggingface_hub import snapshot_download
+
+    if not os.path.exists(os.path.join(MODEL_DIR, "config.json")):
+        snapshot_download(MODEL_NAME, local_dir=MODEL_DIR)
+        model_vol.commit()
 
     cmd = [
         "python", "-m", "vllm.entrypoints.openai.api_server",
