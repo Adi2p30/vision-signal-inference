@@ -15,12 +15,20 @@ let scoreA = 0, scoreB = 0;
 let lastScoreA_ts = 0, lastScoreB_ts = 0;
 const allRows = [];
 let fpsTimestamps = [];
+let dualVlm = false; // set from /config on load
 
 // Play-by-play lookups for score+clock -> wallclock mapping
-// Precise key: "awayScore-homeScore@clock" (e.g. "45-42@14:32")
-// Fallback key: "awayScore-homeScore" (first play that reached that score)
 let scoreClockToWallclock = {};
 let scoreToWallclock = {};
+
+// Detect dual VLM mode from server config
+fetch('/config')
+  .then(r => r.json())
+  .then(cfg => {
+    dualVlm = cfg.dual_vlm;
+    console.log('Mode:', dualVlm ? 'dual VLM' : 'legacy single VLM');
+  })
+  .catch(() => { dualVlm = false; });
 
 fetch('/play-by-play')
   .then(r => r.json())
@@ -29,9 +37,7 @@ fetch('/play-by-play')
     for (const p of plays) {
       const scoreKey = p.awayScore + '-' + p.homeScore;
       const clockKey = scoreKey + '@' + p.clock;
-      // Store every score+clock combo (last play wins for same key)
       scoreClockToWallclock[clockKey] = p.wallclock;
-      // Store first occurrence of each score state as fallback
       if (!seenScore.has(scoreKey)) {
         seenScore.add(scoreKey);
         scoreToWallclock[scoreKey] = p.wallclock;
@@ -62,7 +68,6 @@ function captureFrame() {
 function updateStats() {
   document.getElementById('inflightCount').textContent = inflight;
   document.getElementById('doneCount').textContent = doneTotal;
-  // fps over last 10s
   const now = performance.now();
   fpsTimestamps = fpsTimestamps.filter(t => now - t < 10000);
   const fps = fpsTimestamps.length > 0 ? (fpsTimestamps.length / ((now - fpsTimestamps[0]) / 1000)).toFixed(1) : '0';
@@ -88,7 +93,6 @@ function autoLoop() {
   autoRafId = requestAnimationFrame(autoLoop);
   if (video.paused || video.ended) return;
   const t = video.currentTime;
-  // Capture every unique second of video
   const tRounded = Math.floor(t);
   if (tRounded === lastCaptureTime) return;
   lastCaptureTime = tRounded;
@@ -125,17 +129,16 @@ function fireInference(frame) {
     const el = document.getElementById(entryId);
     if (!el) return;
     el.classList.remove('pending');
+
     if (data.error) {
       el.classList.add('err');
       el.querySelector('.out').textContent = data.error;
-    } else if (data.response.trim() === 'NONE') {
-      el.querySelector('.at').textContent = ts;
-      el.querySelector('.out').textContent = '(no score visible)';
-      el.style.opacity = '0.4';
+    } else if (data.momentum !== undefined) {
+      // Dual VLM mode
+      handleDualResponse(data, el, ts, frame.timestamp);
     } else {
-      el.querySelector('.at').textContent = ts;
-      el.querySelector('.out').textContent = data.response;
-      updateScore(data.response, frame.timestamp);
+      // Legacy single VLM mode
+      handleLegacyResponse(data, el, ts, frame.timestamp);
     }
   })
   .catch(err => {
@@ -153,16 +156,115 @@ function fireInference(frame) {
   });
 }
 
-// --- Score & drought ---
-function updateScore(csvText, currentTs) {
+// --- Dual VLM response handling ---
+function handleDualResponse(data, el, ts, currentTs) {
+  el.querySelector('.at').textContent = ts;
+  const momentum = (data.momentum || '').trim();
+  const score = (data.score || '').trim();
+
+  // Build display text
+  let lines = [];
+  if (momentum && momentum !== 'NONE') lines.push(momentum);
+  if (score && score !== 'NONE') lines.push('score: ' + score);
+
+  if (lines.length === 0) {
+    el.querySelector('.out').textContent = '(no data)';
+    el.style.opacity = '0.4';
+  } else {
+    el.querySelector('.out').textContent = lines.join('\n');
+  }
+
+  // Update scoreboard from score VLM
+  if (score && score !== 'NONE') {
+    updateScoreFromVLM(score, currentTs);
+  }
+
+  // Update momentum from momentum VLM
+  if (momentum && momentum !== 'NONE') {
+    updateMomentumFromVLM(momentum);
+  }
+
+  // Combine for CSV export
+  if (momentum && momentum !== 'NONE') {
+    const mCols = momentum.split(',');
+    const sCols = (score && score !== 'NONE') ? score.split(',') : ['', '', ''];
+    if (mCols.length >= 5) {
+      const combined = [
+        mCols[0], mCols[1],
+        sCols[0] || '', sCols[1] || '', sCols[2] || '',
+        mCols[2], mCols[3], mCols[4]
+      ].join(',');
+      allRows.push(combined);
+    }
+  }
+}
+
+function updateScoreFromVLM(scoreText, currentTs) {
+  const cols = scoreText.split(',');
+  if (cols.length >= 3) {
+    const a = parseInt(cols[0]);
+    const b = parseInt(cols[1]);
+    const gameClock = cols[2]?.trim() || '';
+
+    if (!isNaN(a) && !isNaN(b)) {
+      if (a > scoreA) lastScoreA_ts = currentTs;
+      if (b > scoreB) lastScoreB_ts = currentTs;
+      scoreA = a;
+      scoreB = b;
+    }
+
+    document.getElementById('sbScore').textContent = scoreA + ' - ' + scoreB;
+    if (gameClock) document.getElementById('sbClock').textContent = gameClock;
+
+    const dA = currentTs - lastScoreA_ts;
+    const dB = currentTs - lastScoreB_ts;
+    document.getElementById('droughtA').textContent = formatDrought(dA);
+    document.getElementById('droughtB').textContent = formatDrought(dB);
+
+    // Map to wallclock for chart
+    if (!isNaN(a) && !isNaN(b)) {
+      const scoreKey = a + '-' + b;
+      const clockKey = scoreKey + '@' + gameClock;
+      const wallclock = scoreClockToWallclock[clockKey] || scoreToWallclock[scoreKey];
+      if (wallclock && window.setPlayheadByWallclock) {
+        window.setPlayheadByWallclock(wallclock);
+        window._lastScorePlayheadUpdate = Date.now();
+      }
+    }
+  }
+}
+
+function updateMomentumFromVLM(momentumText) {
+  const cols = momentumText.split(',');
+  // Format: timestamp,action,momentum_team,momentum_score,momentum_reason
+  if (cols.length >= 5) {
+    const mTeam = cols[2]?.trim() || 'neutral';
+    const mScore = cols[3]?.trim() || '0';
+    document.getElementById('sbMomentum').textContent = mTeam + ' ' + mScore;
+  }
+}
+
+// --- Legacy single VLM response handling ---
+function handleLegacyResponse(data, el, ts, currentTs) {
+  if (data.response.trim() === 'NONE') {
+    el.querySelector('.at').textContent = ts;
+    el.querySelector('.out').textContent = '(no score visible)';
+    el.style.opacity = '0.4';
+  } else {
+    el.querySelector('.at').textContent = ts;
+    el.querySelector('.out').textContent = data.response;
+    updateScoreLegacy(data.response, currentTs);
+  }
+}
+
+// --- Legacy score update (original 8-column CSV format) ---
+function updateScoreLegacy(csvText, currentTs) {
   const trimmed = csvText.trim();
-  // VLM returns NONE when it can't see the scoreboard — skip entirely
   if (trimmed === 'NONE' || trimmed === '') return;
 
   const lines = trimmed.split('\n');
   for (const line of lines) {
     const cols = line.split(',');
-    // New format: timestamp,action,team_a_score,team_b_score,game_clock,momentum_team,momentum_score,momentum_reason
     if (cols.length >= 8) {
       const a = parseInt(cols[2]);
       const b = parseInt(cols[3]);
@@ -179,8 +281,6 @@ function updateScore(csvText, currentTs) {
       document.getElementById('sbMomentum').textContent = mTeam + ' ' + mScore;
       allRows.push(line.trim());
 
-      // Map VLM-extracted score+clock to real wallclock via play-by-play
-      // Try precise score+clock match first, fall back to score-only
       const scoreKey = a + '-' + b;
       const clockKey = scoreKey + '@' + gameClock;
       const wallclock = scoreClockToWallclock[clockKey] || scoreToWallclock[scoreKey];
