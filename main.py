@@ -1,7 +1,7 @@
-import argparse
 import asyncio
 import csv
 import json
+import os
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +14,19 @@ import httpx
 import uvicorn
 from openai import AsyncOpenAI
 
+# Environment variables (with defaults)
+GAME_ID = os.environ.get("GAME_ID", "26feb09arizku")
+VLM_ENDPOINT = os.environ.get("VLM_ENDPOINT", "https://adityapdev13--qwen3-vl-inference-inference-serve.modal.run")
+SCORE_ENDPOINT = os.environ.get("SCORE_ENDPOINT", "https://adityapdev13--qwen3-vl-inference-scoreinference-serve.modal.run/v1/score")
+MODEL_NAME = os.environ.get("MODEL_NAME", "Qwen/Qwen3-VL-8B-Instruct")
+PORT = int(os.environ.get("PORT", "8080"))
+
+# Normalize VLM endpoint to end with /v1 so the OpenAI client hits POST /v1/chat/completions
+_endpoint = VLM_ENDPOINT.strip().rstrip('/')
+if not _endpoint.endswith('/v1'):
+    _endpoint = _endpoint + '/v1'
+VLM_ENDPOINT = _endpoint
+
 
 def strip_think(text):
     """Strip Qwen3 <think>...</think> reasoning tokens from response."""
@@ -22,37 +35,21 @@ def strip_think(text):
     return re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(description="Video Frame Inference Web UI")
-    parser.add_argument("--id", required=True, help="Game ID (loads data/stream-{id}.mp4, data/pbp-{id}.json, data/kalshi-price-history-{id}.csv)")
-    parser.add_argument("--endpoint", required=True, help="Modal vLLM endpoint URL for momentum VLM")
-    parser.add_argument("--score-endpoint", default="", help="Modal score VLM endpoint URL (enables dual-VLM mode)")
-    parser.add_argument("--model", default="Qwen/Qwen3-VL-8B-Instruct", help="Model name served by vLLM")
-    parser.add_argument("--port", type=int, default=8080, help="Local web UI port (default: 8080)")
-    args = parser.parse_args()
-    # Guard against non-breaking spaces from copy-paste (U+00A0 -> regular space)
-    args.endpoint = args.endpoint.replace('\u00a0', ' ').strip()
-    args.score_endpoint = args.score_endpoint.replace('\u00a0', ' ').strip()
-    return args
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    args = parse_args()
-
     data_dir = Path(__file__).parent / "data"
-    video_path = data_dir / f"stream-{args.id}.mp4"
+    video_path = data_dir / f"stream-{GAME_ID}.mp4"
     if not video_path.exists():
         raise SystemExit(f"Error: video file '{video_path}' not found")
 
-    app.state.game_id = args.id
-    app.state.model_name = args.model
-    app.state.client = AsyncOpenAI(base_url=args.endpoint, api_key="not-needed")
-    app.state.score_endpoint = args.score_endpoint
-    app.state.score_http = httpx.AsyncClient(timeout=httpx.Timeout(60.0)) if args.score_endpoint else None
+    app.state.game_id = GAME_ID
+    app.state.model_name = MODEL_NAME
+    app.state.client = AsyncOpenAI(base_url=VLM_ENDPOINT, api_key="not-needed")
+    app.state.score_endpoint = SCORE_ENDPOINT
+    app.state.score_http = httpx.AsyncClient(timeout=httpx.Timeout(60.0)) if SCORE_ENDPOINT else None
 
     # Extract team names from PBP data
-    pbp_path = data_dir / f"pbp-{args.id}.json"
+    pbp_path = data_dir / f"pbp-{GAME_ID}.json"
     away_name, home_name = "Away", "Home"
     away_abbr, home_abbr = "AWAY", "HOME"
     if pbp_path.exists():
@@ -89,8 +86,8 @@ async def lifespan(app: FastAPI):
         "outlier_count": 0,          # consecutive rejected frames
     }
 
-    mode = "dual VLM" if args.score_endpoint else "single VLM"
-    print(f"Game ID: {args.id} — {away_abbr} @ {home_abbr} [{mode}]")
+    mode = "dual VLM" if SCORE_ENDPOINT else "single VLM"
+    print(f"Game ID: {GAME_ID} — {away_abbr} @ {home_abbr} [{mode}]")
 
     yield
 
@@ -417,9 +414,8 @@ async def infer(request: Request):
 
 
 def main():
-    args = parse_args()
-    print(f"Starting web UI at http://localhost:{args.port}")
-    uvicorn.run("main:app", host="0.0.0.0", port=args.port, reload=True)
+    print(f"Starting web UI at http://localhost:{PORT}")
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT)
 
 
 if __name__ == "__main__":
