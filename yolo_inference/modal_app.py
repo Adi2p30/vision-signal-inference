@@ -1,9 +1,7 @@
 import modal
 
 image = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12"
-    )
+    modal.Image.from_registry("nvidia/cuda:12.8.0-devel-ubuntu22.04", add_python="3.12")
     .apt_install("libgl1", "libglib2.0-0", "libxcb1")
     .pip_install("ultralytics", "opencv-python-headless", "fastapi[standard]", "lapx")
 )
@@ -13,18 +11,18 @@ app = modal.App("yolo26s-inference")
 
 @app.cls(
     image=image,
-    gpu="T4",
+    gpu="L4",
     timeout=600,
     scaledown_window=300,
-    min_containers=0,
-    max_containers=2,
+    min_containers=8,
+    max_containers=10,
 )
 class YOLOInference:
     @modal.enter()
     def load(self):
         from ultralytics import YOLO
 
-        self.model = YOLO("yolo11s.pt")
+        self.model = YOLO("yolo26m.pt")
         # Warm up
         import numpy as np
 
@@ -83,9 +81,7 @@ class YOLOInference:
                     cls_name = result.names[cls_id]
                     conf = float(boxes.conf[i])
                     bbox = boxes.xyxy[i].tolist()
-                    track_id = (
-                        int(boxes.id[i]) if boxes.id is not None else None
-                    )
+                    track_id = int(boxes.id[i]) if boxes.id is not None else None
                     detections.append(
                         {
                             "class": cls_name,
