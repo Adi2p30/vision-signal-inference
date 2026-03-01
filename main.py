@@ -288,6 +288,7 @@ async def live(request: LiveRequest):
     market_signals: list[MarketSignal] = []
     current_positions = positions_manager.load().get("positions", {})
     _BUY_FRACTION = 0.05  # risk 5% of buying power per trade
+    _MIN_PRICE_CHANGE = 0.02
 
     for ticker, trend, signal in zip(tickers, trends, signals):
         price = trend.get("current_price")
@@ -305,6 +306,8 @@ async def live(request: LiveRequest):
                 bp = positions_manager.get_buying_power()
                 contracts = int(bp * _BUY_FRACTION / price) if price > 0 else 0
                 if contracts <= 0:
+                    action = "HOLD"
+                elif price is not None and abs(price - held.get("avg_price", 0)) < _MIN_PRICE_CHANGE:
                     action = "HOLD"
             else:
                 held = current_positions.get(ticker)
