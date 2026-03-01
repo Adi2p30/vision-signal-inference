@@ -1,2 +1,2 @@
-# polibetting-inference
+# vision-signal-inference
 
