@@ -2,3 +2,5 @@ python main.py --id 26feb09arizku --endpoint https://mahitmehta--qwen3-vl-infere
 
 
 python -m yolo_inference.app --id 26feb09arizku --endpoint https://adityapdev13--yolo26s-inference-yoloinference-serve.modal.run/v1/detect --port 8081
+
+python main.py --id 26feb09arizku --endpoint https://adityapdev13--qwen3-vl-inference-inference-serve.modal.run/v1  --score-endpoint  https://adityapdev13--qwen3-vl-inference-scoreinference-serve.modal.run/v1/score
