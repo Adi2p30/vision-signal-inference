@@ -16,17 +16,28 @@ let lastScoreA_ts = 0, lastScoreB_ts = 0;
 const allRows = [];
 let fpsTimestamps = [];
 let dualVlm = false; // set from /config on load
+let teamAbbr = { a: 'AWAY', b: 'HOME' };
 
 // Play-by-play lookups for score+clock -> wallclock mapping
 let scoreClockToWallclock = {};
 let scoreToWallclock = {};
 
-// Detect dual VLM mode from server config
+// Detect dual VLM mode + team names from server config
 fetch('/config')
   .then(r => r.json())
   .then(cfg => {
     dualVlm = cfg.dual_vlm;
     console.log('Mode:', dualVlm ? 'dual VLM' : 'legacy single VLM');
+    // Apply team names to scoreboard
+    if (cfg.team_a) {
+      teamAbbr.a = cfg.team_a.abbr;
+      teamAbbr.b = cfg.team_b.abbr;
+      document.getElementById('teamALabel').textContent = cfg.team_a.abbr;
+      document.getElementById('teamBLabel').textContent = cfg.team_b.abbr;
+      document.getElementById('droughtALabel').textContent = cfg.team_a.abbr;
+      document.getElementById('droughtBLabel').textContent = cfg.team_b.abbr;
+      console.log('Teams:', cfg.team_a.name, '(away) vs', cfg.team_b.name, '(home)');
+    }
   })
   .catch(() => { dualVlm = false; });
 
@@ -195,11 +206,11 @@ function handleDualResponse(data, el, ts, currentTs) {
   // Combine for CSV export
   if (momentum && momentum !== 'NONE') {
     const mCols = momentum.split(',');
-    const sCols = (score && score !== 'NONE') ? score.split(',') : ['', '', ''];
+    const sCols = (score && score !== 'NONE') ? score.split(',') : ['', '', '', ''];
     if (mCols.length >= 5) {
       const combined = [
         mCols[0], mCols[1],
-        sCols[0] || '', sCols[1] || '', sCols[2] || '',
+        sCols[0] || '', sCols[1] || '', sCols[2] || '', sCols[3] || '',
         mCols[2], mCols[3], mCols[4]
       ].join(',');
       allRows.push(combined);
@@ -265,9 +276,10 @@ function handleLegacyResponse(data, el, ts, currentTs) {
     el.querySelector('.out').textContent = data.response;
     updateScoreLegacy(data.response, currentTs);
   }
+  displayFlags(data.flags);
 }
 
-// --- Legacy score update (original 8-column CSV format) ---
+// --- Legacy score update (9-column CSV format with period) ---
 function updateScoreLegacy(csvText, currentTs) {
   const trimmed = csvText.trim();
   if (trimmed === 'NONE' || trimmed === '') return;
@@ -275,7 +287,34 @@ function updateScoreLegacy(csvText, currentTs) {
   const lines = trimmed.split('\n');
   for (const line of lines) {
     const cols = line.split(',');
-    if (cols.length >= 8) {
+    // Format: timestamp,action,score_a,score_b,clock,period,mom_team,mom_score,mom_reason
+    if (cols.length >= 9) {
+      const a = parseInt(cols[2]);
+      const b = parseInt(cols[3]);
+      const gameClock = cols[4]?.trim() || '';
+      const period = parseInt(cols[5]?.trim());
+      if (!isNaN(a) && !isNaN(b)) {
+        if (a > scoreA) lastScoreA_ts = currentTs;
+        if (b > scoreB) lastScoreB_ts = currentTs;
+        scoreA = a;
+        scoreB = b;
+      }
+      if (gameClock) document.getElementById('sbClock').textContent = gameClock;
+      if (!isNaN(period)) document.getElementById('sbPeriod').textContent = period + 'H';
+      const mTeam = cols[6]?.trim() || 'neutral';
+      const mScore = cols[7]?.trim() || '0';
+      document.getElementById('sbMomentum').textContent = mTeam + ' ' + mScore;
+      allRows.push(line.trim());
+
+      const scoreKey = a + '-' + b;
+      const clockKey = scoreKey + '@' + gameClock;
+      const wallclock = scoreClockToWallclock[clockKey] || scoreToWallclock[scoreKey];
+      if (wallclock && window.setPlayheadByWallclock) {
+        window.setPlayheadByWallclock(wallclock);
+        window._lastScorePlayheadUpdate = Date.now();
+      }
+    } else if (cols.length >= 8) {
+      // Fallback: old 8-column format without period
       const a = parseInt(cols[2]);
       const b = parseInt(cols[3]);
       const gameClock = cols[4]?.trim() || '';
@@ -290,14 +329,6 @@ function updateScoreLegacy(csvText, currentTs) {
       const mScore = cols[6]?.trim() || '0';
       document.getElementById('sbMomentum').textContent = mTeam + ' ' + mScore;
       allRows.push(line.trim());
-
-      const scoreKey = a + '-' + b;
-      const clockKey = scoreKey + '@' + gameClock;
-      const wallclock = scoreClockToWallclock[clockKey] || scoreToWallclock[scoreKey];
-      if (wallclock && window.setPlayheadByWallclock) {
-        window.setPlayheadByWallclock(wallclock);
-        window._lastScorePlayheadUpdate = Date.now();
-      }
     }
   }
   document.getElementById('sbScore').textContent = scoreA + ' - ' + scoreB;
@@ -339,12 +370,12 @@ function displayFlags(flags) {
     return;
   }
   container.style.display = 'block';
-  container.innerHTML = flags.map(function(f) {
-    return '<div class="flag flag-' + f.severity + '">' +
-      '<span class="flag-label">' + f.label + '</span> ' +
-      '<span class="flag-msg">' + f.message + '</span>' +
-      '</div>';
-  }).join('');
+  container.innerHTML = flags.map(f =>
+    '<div class="flag flag-' + f.severity + '">' +
+    '<span class="flag-label">' + f.label + '</span> ' +
+    '<span class="flag-msg">' + f.message + '</span>' +
+    '</div>'
+  ).join('');
 }
 
 function exportCSV() {

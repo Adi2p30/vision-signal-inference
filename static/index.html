@@ -39,8 +39,8 @@
       <div class="chart-wrap">
         <canvas id="kalshiChart"></canvas>
         <div class="chart-legend">
-          <div class="leg"><span class="swatch" style="background:#4a9eff"></span><span style="color:#4a9eff">Kansas</span></div>
-          <div class="leg"><span class="swatch" style="background:#ff6b6b"></span><span style="color:#ff6b6b">Arizona</span></div>
+          <div class="leg"><span class="swatch" style="background:#4a9eff"></span><span id="kalshiLegA" style="color:#4a9eff">—</span></div>
+          <div class="leg"><span class="swatch" style="background:#ff6b6b"></span><span id="kalshiLegB" style="color:#ff6b6b">—</span></div>
         </div>
         <div class="chart-playhead" id="chartPlayhead"></div>
       </div>
@@ -55,18 +55,18 @@
       </div>
     </div>
     <div class="scoreboard">
-      <div class="sb-team left-t">Team A</div>
+      <div class="sb-team left-t" id="teamALabel">Away</div>
       <div class="sb-center">
         <div class="sb-score" id="sbScore">0 - 0</div>
         <div class="sb-clock"><span id="sbClock">20:00</span> <span class="sb-period" id="sbPeriod">1H</span></div>
         <div class="sb-correction" id="sbCorrection"></div>
       </div>
-      <div class="sb-team right-t">Team B</div>
+      <div class="sb-team right-t" id="teamBLabel">Home</div>
       <div class="sb-momentum">momentum <span class="val" id="sbMomentum">neutral 0</span></div>
     </div>
     <div class="drought">
-      <span>A drought: <span class="d-val" id="droughtA">0s</span></span>
-      <span>B drought: <span class="d-val" id="droughtB">0s</span></span>
+      <span><span id="droughtALabel">A</span> drought: <span class="d-val" id="droughtA">0s</span></span>
+      <span><span id="droughtBLabel">B</span> drought: <span class="d-val" id="droughtB">0s</span></span>
     </div>
     <div class="flags-container" id="flagsContainer"></div>
     <div class="entries" id="logEntries"></div>

@@ -31,6 +31,12 @@
         return entry;
       });
 
+      // Update Kalshi chart legend labels from data columns
+      const legA = document.getElementById('kalshiLegA');
+      const legB = document.getElementById('kalshiLegB');
+      if (legA && seriesKeys[0]) legA.textContent = seriesKeys[0];
+      if (legB && seriesKeys[1]) legB.textContent = seriesKeys[1];
+
       minTs = chartData[0].ts;
       maxTs = chartData[chartData.length - 1].ts;
 
