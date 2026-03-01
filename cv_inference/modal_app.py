@@ -421,8 +421,37 @@ class RFDETRSam2Inference:
 
         web = FastAPI()
 
-        PERSON_CLASS = 0
-        BALL_CLASS = 32
+        # RF-DETR uses original COCO 1-indexed class IDs
+        PERSON_CLASSES = {0, 1}  # cover both 0-indexed and 1-indexed
+        BALL_CLASSES = {32, 37}  # sports ball in both schemes
+
+        @web.post("/v1/debug")
+        async def debug(request: Request):
+            """Return raw RF-DETR detections for debugging."""
+            body = await request.json()
+            img_b64 = body["base64"]
+            img_bytes = base64.b64decode(img_b64)
+            img_arr = np.frombuffer(img_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+            if frame is None:
+                return {"error": "decode failed"}
+            all_dets = self.detector.predict(frame, threshold=0.3)
+            raw = []
+            for i in range(len(all_dets)):
+                raw.append(
+                    {
+                        "class_id": int(all_dets.class_id[i]),
+                        "confidence": round(float(all_dets.confidence[i]), 3),
+                        "bbox": [round(v, 1) for v in all_dets.xyxy[i].tolist()],
+                    }
+                )
+            return {
+                "total": len(all_dets),
+                "unique_classes": sorted(set(int(c) for c in all_dets.class_id))
+                if len(all_dets) > 0
+                else [],
+                "detections": raw,
+            }
 
         @web.post("/v1/segment")
         async def segment(request: Request):
@@ -442,10 +471,10 @@ class RFDETRSam2Inference:
             h, w = frame.shape[:2]
 
             # 1. RF-DETR detection
-            all_dets = self.detector.predict(frame, threshold=0.4)
+            all_dets = self.detector.predict(frame, threshold=0.3)
 
-            person_mask_idx = all_dets.class_id == PERSON_CLASS
-            ball_mask_idx = all_dets.class_id == BALL_CLASS
+            person_mask_idx = np.isin(all_dets.class_id, list(PERSON_CLASSES))
+            ball_mask_idx = np.isin(all_dets.class_id, list(BALL_CLASSES))
             person_dets = all_dets[person_mask_idx]
             ball_dets = all_dets[ball_mask_idx]
 
@@ -616,10 +645,10 @@ class RFDETRSam2Inference:
                 )
 
             h, w = frame.shape[:2]
-            all_dets = self.detector.predict(frame, threshold=0.4)
+            all_dets = self.detector.predict(frame, threshold=0.3)
 
-            person_mask_idx = all_dets.class_id == PERSON_CLASS
-            ball_mask_idx = all_dets.class_id == BALL_CLASS
+            person_mask_idx = np.isin(all_dets.class_id, list(PERSON_CLASSES))
+            ball_mask_idx = np.isin(all_dets.class_id, list(BALL_CLASSES))
             person_dets = all_dets[person_mask_idx]
             ball_dets = all_dets[ball_mask_idx]
 

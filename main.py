@@ -215,14 +215,29 @@ def evaluate_flags(gs, team_a_abbr="AWAY", team_b_abbr="HOME"):
     lead = abs(sa - sb)
     leader = team_a_abbr if sa > sb else (team_b_abbr if sb > sa else None)
 
-    # Flag: 6+ point lead with <=90s left in 2nd half
-    if period == 2 and clock is not None and clock <= 90 and lead >= 6 and leader:
+    # Flag: 6+ point lead with <=2:00 left in 2nd half
+    if period == 2 and clock is not None and clock <= 120 and lead >= 6 and leader:
         flags.append({
             "id": "late_lead_6",
-            "label": "LATE LEAD",
-            "message": f"{leader} leads by {lead} with {clock}s left in 2H",
+            "label": "🚩 LATE LEAD",
+            "message": f"{leader} leads by {lead} with {format_clock(clock)} left in 2H",
             "severity": "high",
         })
+
+    # Flag: tied game
+    if sa == sb and sa > 0:
+        flag = {
+            "id": "tied_game",
+            "label": "🏁 TIED",
+            "message": f"Game tied at {sa}",
+            "severity": "medium",
+        }
+        # Escalate if tie is late in 2nd half
+        if period == 2 and clock is not None and clock <= 120:
+            flag["label"] = "🚩 TIED LATE"
+            flag["message"] = f"Game tied at {sa} with {format_clock(clock)} left in 2H"
+            flag["severity"] = "high"
+        flags.append(flag)
 
     return flags
 
@@ -269,15 +284,55 @@ def process_score(gs, score_csv, video_ts, team_a_abbr="AWAY", team_b_abbr="HOME
     return evaluate_flags(gs, team_a_abbr, team_b_abbr), clock_correction
 
 
+_VALID_ACTIONS = (
+    "VALID ACTIONS (use EXACTLY one of these, filling in [brackets] as needed):\n"
+    "  Jump Ball won by [player]\n"
+    "  Jump Ball lost by [player]\n"
+    "  Misses layup\n"
+    "  Misses [X]-foot [shot type]\n"
+    "  Misses [X]-foot three point jumper\n"
+    "  Offensive Rebound\n"
+    "  Defensive Rebound\n"
+    "  Deadball Team Rebound\n"
+    "  Bad pass turnover\n"
+    "  Traveling turnover\n"
+    "  Shot clock turnover\n"
+    "  Steal\n"
+    "  Makes layup\n"
+    "  Makes [X]-foot [shot type]\n"
+    "  Makes [X]-foot three point jumper\n"
+    "  Makes [X]-foot dunk\n"
+    "  Makes alley oop dunk\n"
+    "  Makes free throw [X] of [X]\n"
+    "  Misses free throw [X] of [X]\n"
+    "  Block\n"
+    "  Foul on [player]\n"
+    "  Timeout\n"
+    "  Official TV Timeout\n"
+    "  Substitution\n"
+    "  Coach's Challenge (Overturned)\n"
+    "  Assists\n"
+    "  End of 1st half\n"
+    "  End of 2nd half\n"
+    "  End of Game\n"
+    "Replace [player] with the player's last name, [X] with a number, "
+    "[shot type] with jumper/pullup jumper/fadeaway/hook shot. "
+    "Do NOT invent actions outside this list."
+)
+
 MOMENTUM_PROMPT = (
     "/no_think\n"
     "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
     "Columns: timestamp,action,momentum_team,momentum_score,momentum_reason\n"
-    "- action: <=10 tokens, describe the current play action\n"
+    "- action: MUST be from the valid actions list below\n"
     "- momentum_team: team_A/team_B/neutral\n"
     "- momentum_score: -5 to +5\n"
     "- momentum_reason: 1-5 tokens\n"
-    "Example: 12.0,fast break layup scored,team_A,3,quick transition"
+    "\n" + _VALID_ACTIONS + "\n"
+    "\n"
+    "Example: 12.0,Makes layup,team_A,3,quick transition\n"
+    "Example: 45.0,Misses 18-foot jumper,team_B,-1,cold shooting\n"
+    "Example: 60.0,Offensive Rebound,team_A,2,second chance"
 )
 
 LEGACY_PROMPT = (
@@ -285,14 +340,17 @@ LEGACY_PROMPT = (
     "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
     "If you cannot see the scoreboard or game clock clearly, output exactly: NONE\n"
     "Columns: timestamp,action,team_a_score,team_b_score,game_clock,period,momentum_team,momentum_score,momentum_reason\n"
-    "- action: <=10 tokens\n"
+    "- action: MUST be from the valid actions list below\n"
     "- game_clock: countdown timer shown on screen, format M:SS or MM:SS exactly as displayed (e.g. 14:32, 3:07, 0:48)\n"
     "- period: current half/period number shown on scoreboard (1 or 2)\n"
     "- momentum_team: team_A/team_B/neutral\n"
     "- momentum_score: -5 to +5\n"
     "- momentum_reason: 1-5 tokens\n"
-    "Example: 12.0,fast break layup scored,45,42,14:32,2,team_A,3,quick transition\n"
-    "Example under 1 min: 12.0,free throw made,52,50,0:48,2,team_A,2,clutch free throws"
+    "\n" + _VALID_ACTIONS + "\n"
+    "\n"
+    "Example: 12.0,Makes layup,45,42,14:32,2,team_A,3,quick transition\n"
+    "Example: 55.0,Makes free throw 2 of 2,52,50,0:48,2,team_A,2,clutch free throws\n"
+    "Example: 30.0,Defensive Rebound,45,42,8:15,1,neutral,0,routine rebound"
 )
 
 
