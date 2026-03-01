@@ -45,6 +45,19 @@ async def lifespan(app: FastAPI):
     app.state.score_endpoint = args.score_endpoint
     app.state.score_http = httpx.AsyncClient(timeout=httpx.Timeout(60.0)) if args.score_endpoint else None
 
+    # Game state for flag evaluation + clock self-correction
+    app.state.game = {
+        "score_a": 0,
+        "score_b": 0,
+        "clock_seconds": None,
+        "period": 0,
+        # Clock self-correction tracking
+        "accepted_clock": None,      # last accepted clock reading (seconds)
+        "accepted_video_ts": None,   # video timestamp when last accepted
+        "accepted_period": 0,        # period when last accepted
+        "outlier_count": 0,          # consecutive rejected frames
+    }
+
     assert(args.score_endpoint)
     print(f"Game ID: {args.id}")
 
@@ -56,6 +69,150 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+CLOCK_TOLERANCE = 0.10   # 10% deviation to flag as outlier
+OUTLIER_ACCEPT = 30      # accept VLM value after this many consecutive outliers
+
+
+def parse_clock(clock_str):
+    """Parse M:SS or MM:SS game clock to total seconds."""
+    if not clock_str:
+        return None
+    m = re.match(r'^(\d{1,2}):(\d{2})$', clock_str.strip())
+    if m:
+        return int(m.group(1)) * 60 + int(m.group(2))
+    return None
+
+
+def format_clock(seconds):
+    """Convert total seconds to M:SS display string."""
+    if seconds is None:
+        return None
+    seconds = max(0, int(seconds))
+    return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _accept_clock(gs, clock_seconds, video_ts, period):
+    """Accept a clock reading and reset outlier tracking."""
+    gs["accepted_clock"] = clock_seconds
+    gs["accepted_video_ts"] = video_ts
+    gs["accepted_period"] = period
+    gs["clock_seconds"] = clock_seconds
+    gs["outlier_count"] = 0
+
+
+def validate_clock(gs, vlm_clock, video_ts, vlm_period=None):
+    """Validate VLM clock against expected countdown.
+
+    Tracks an internal countdown: for every second of video time elapsed,
+    the expected game clock decreases by one second.  If the VLM reading
+    deviates more than CLOCK_TOLERANCE (10%), it is rejected and the
+    expected value is used instead.  After OUTLIER_ACCEPT (30) consecutive
+    rejections, the VLM value is force-accepted.
+
+    Returns (corrected_clock_seconds, accepted_bool).
+    """
+    if vlm_clock is None:
+        return gs["clock_seconds"], True
+
+    period = vlm_period or gs["accepted_period"] or 0
+
+    # Period change (halftime) -> clock resets, accept immediately
+    if vlm_period and vlm_period != gs["accepted_period"]:
+        _accept_clock(gs, vlm_clock, video_ts, vlm_period)
+        return vlm_clock, True
+
+    # First reading ever -> accept
+    if gs["accepted_clock"] is None:
+        _accept_clock(gs, vlm_clock, video_ts, period)
+        return vlm_clock, True
+
+    # Expected clock = last accepted minus elapsed video time
+    elapsed = video_ts - gs["accepted_video_ts"]
+    expected = gs["accepted_clock"] - elapsed
+    expected = max(0, expected)
+
+    # 10% tolerance (floor reference at 10s to avoid issues near 0:00)
+    reference = max(expected, 10)
+    deviation = abs(vlm_clock - expected) / reference
+
+    if deviation <= CLOCK_TOLERANCE:
+        _accept_clock(gs, vlm_clock, video_ts, period)
+        return vlm_clock, True
+    else:
+        gs["outlier_count"] += 1
+        if gs["outlier_count"] >= OUTLIER_ACCEPT:
+            # 30 consecutive outliers -> trust the VLM
+            _accept_clock(gs, vlm_clock, video_ts, period)
+            return vlm_clock, True
+        # Reject: use expected countdown instead
+        corrected = max(0, int(expected))
+        gs["clock_seconds"] = corrected
+        return corrected, False
+
+
+def evaluate_flags(gs):
+    """Check game conditions and return active flags."""
+    flags = []
+    sa, sb = gs["score_a"], gs["score_b"]
+    clock = gs["clock_seconds"]
+    period = gs["period"]
+    lead = abs(sa - sb)
+    leader = "Team A" if sa > sb else ("Team B" if sb > sa else None)
+
+    # Flag: 6+ point lead with <=90s left in 2nd half
+    if period == 2 and clock is not None and clock <= 90 and lead >= 6 and leader:
+        flags.append({
+            "id": "late_lead_6",
+            "label": "LATE LEAD",
+            "message": f"{leader} leads by {lead} with {clock}s left in 2H",
+            "severity": "high",
+        })
+
+    return flags
+
+
+def process_score(gs, score_csv, video_ts):
+    """Parse dual-VLM score CSV, validate clock, evaluate flags.
+
+    Returns (flags, clock_correction).
+    """
+    no_correction = {"accepted": True, "outlier_streak": 0}
+    if not score_csv or score_csv.strip() == "NONE":
+        return [], no_correction
+
+    cols = score_csv.split(',')
+    if len(cols) < 3:
+        return [], no_correction
+
+    try:
+        gs["score_a"] = int(cols[0].strip())
+        gs["score_b"] = int(cols[1].strip())
+    except ValueError:
+        pass
+
+    raw_clock = parse_clock(cols[2].strip())
+    vlm_period = None
+    if len(cols) >= 4:
+        try:
+            vlm_period = int(cols[3].strip())
+        except ValueError:
+            pass
+
+    corrected, accepted = validate_clock(gs, raw_clock, video_ts, vlm_period)
+    gs["clock_seconds"] = corrected
+    if vlm_period:
+        gs["period"] = vlm_period
+
+    clock_correction = {
+        "raw": raw_clock,
+        "corrected": corrected,
+        "corrected_display": format_clock(corrected),
+        "accepted": accepted,
+        "outlier_streak": gs["outlier_count"],
+    }
+    return evaluate_flags(gs), clock_correction
+
 
 MOMENTUM_PROMPT = (
     "/no_think\n"
@@ -128,6 +285,13 @@ async def price_history(request: Request):
     return JSONResponse(rows)
 
 
+@app.get("/flags")
+async def flags(request: Request):
+    """Return current game state and active flags."""
+    gs = request.app.state.game
+    return {"game_state": gs, "flags": evaluate_flags(gs)}
+
+
 @app.get("/config")
 async def config(request: Request):
     """Tell the frontend which mode we're running in."""
@@ -180,7 +344,13 @@ async def infer(request: Request):
 
         try:
             momentum, score_val = await asyncio.gather(get_momentum(), get_score())
-            return {"momentum": momentum or "NONE", "score": score_val or "NONE"}
+            flags, clock_correction = process_score(state.game, score_val, timestamp)
+            return {
+                "momentum": momentum or "NONE",
+                "score": score_val or "NONE",
+                "flags": flags,
+                "clock_correction": clock_correction,
+            }
         except Exception as e:
             return {"error": str(e)}
     else:

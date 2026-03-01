@@ -184,6 +184,14 @@ function handleDualResponse(data, el, ts, currentTs) {
     updateMomentumFromVLM(momentum);
   }
 
+  // Apply clock correction from backend (overrides raw VLM clock)
+  if (data.clock_correction) {
+    applyClockCorrection(data.clock_correction);
+  }
+
+  // Display flags from backend
+  displayFlags(data.flags);
+
   // Combine for CSV export
   if (momentum && momentum !== 'NONE') {
     const mCols = momentum.split(',');
@@ -205,6 +213,7 @@ function updateScoreFromVLM(scoreText, currentTs) {
     const a = parseInt(cols[0]);
     const b = parseInt(cols[1]);
     const gameClock = cols[2]?.trim() || '';
+    const period = cols[3] ? parseInt(cols[3].trim()) : null;
 
     if (!isNaN(a) && !isNaN(b)) {
       if (a > scoreA) lastScoreA_ts = currentTs;
@@ -215,6 +224,7 @@ function updateScoreFromVLM(scoreText, currentTs) {
 
     document.getElementById('sbScore').textContent = scoreA + ' - ' + scoreB;
     if (gameClock) document.getElementById('sbClock').textContent = gameClock;
+    if (period && !isNaN(period)) document.getElementById('sbPeriod').textContent = period + 'H';
 
     const dA = currentTs - lastScoreA_ts;
     const dB = currentTs - lastScoreB_ts;
@@ -302,6 +312,41 @@ function formatDrought(sec) {
   return Math.floor(sec / 60) + 'm ' + (sec % 60).toFixed(0) + 's';
 }
 
+// --- Clock self-correction display ---
+function applyClockCorrection(cc) {
+  const el = document.getElementById('sbCorrection');
+  if (!cc) { el.textContent = ''; return; }
+
+  if (cc.accepted) {
+    el.textContent = '';
+    el.className = 'sb-correction';
+  } else {
+    // Clock was rejected -> show corrected value and streak
+    if (cc.corrected_display) {
+      document.getElementById('sbClock').textContent = cc.corrected_display;
+    }
+    el.textContent = 'CORRECTING (' + cc.outlier_streak + '/30)';
+    el.className = 'sb-correction active';
+  }
+}
+
+// --- Flag display ---
+function displayFlags(flags) {
+  const container = document.getElementById('flagsContainer');
+  if (!flags || flags.length === 0) {
+    container.innerHTML = '';
+    container.style.display = 'none';
+    return;
+  }
+  container.style.display = 'block';
+  container.innerHTML = flags.map(function(f) {
+    return '<div class="flag flag-' + f.severity + '">' +
+      '<span class="flag-label">' + f.label + '</span> ' +
+      '<span class="flag-msg">' + f.message + '</span>' +
+      '</div>';
+  }).join('');
+}
+
 function exportCSV() {
   const header = 'timestamp,action,team_a_score,team_b_score,game_clock,momentum_team,momentum_score,momentum_reason';
   const csvData = header + '\n' + allRows.join('\n');
@@ -320,8 +365,12 @@ function clearLog() {
   doneTotal = 0;
   document.getElementById('sbScore').textContent = '0 - 0';
   document.getElementById('sbClock').textContent = '20:00';
+  document.getElementById('sbPeriod').textContent = '1H';
+  document.getElementById('sbCorrection').textContent = '';
   document.getElementById('sbMomentum').textContent = 'neutral 0';
   document.getElementById('droughtA').textContent = '0s';
   document.getElementById('droughtB').textContent = '0s';
+  document.getElementById('flagsContainer').innerHTML = '';
+  document.getElementById('flagsContainer').style.display = 'none';
   updateStats();
 }
