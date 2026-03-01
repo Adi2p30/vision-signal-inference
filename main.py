@@ -45,14 +45,7 @@ async def lifespan(app: FastAPI):
     app.state.score_endpoint = args.score_endpoint
     app.state.score_http = httpx.AsyncClient(timeout=httpx.Timeout(60.0)) if args.score_endpoint else None
 
-    if args.score_endpoint:
-        print(f"Dual VLM mode enabled")
-        print(f"  Momentum endpoint: {args.endpoint}")
-        print(f"  Score endpoint:    {args.score_endpoint}")
-    else:
-        print(f"Legacy single VLM mode")
-        print(f"  Endpoint: {args.endpoint}")
-
+    assert(args.score_endpoint)
     print(f"Game ID: {args.id}")
 
     yield
