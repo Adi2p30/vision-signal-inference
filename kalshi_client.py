@@ -26,6 +26,13 @@ _DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2"
 
 _session: Optional[requests.Session] = None
 
+# ── TTL caches for market data ───────────────────────────────────────────────
+_MARKET_CACHE: dict[str, tuple[float, dict]] = {}
+_MARKET_TTL = 30  # seconds — market info (title, status) changes slowly
+
+_TREND_CACHE: dict[str, tuple[float, dict]] = {}
+_TREND_TTL = 10   # seconds — price trends tolerate a short stale window
+
 
 def _base_url() -> str:
     return _DEMO_BASE if os.environ.get("KALSHI_USE_DEMO") else _PROD_BASE
@@ -164,9 +171,15 @@ def search_markets(query: str, series_ticker: str = "KXNCAAMBGAME") -> list[dict
 def get_market(ticker: str) -> dict:
     """
     Fetch a single market by ticker, enriched with orderbook midpoint price.
+    Results are cached for 30 s to avoid redundant API calls.
 
     Returns normalized market dict or {"error": "..."}.
     """
+    if ticker in _MARKET_CACHE:
+        ts, cached = _MARKET_CACHE[ticker]
+        if time.time() - ts < _MARKET_TTL:
+            return cached
+
     data = _get(f"/markets/{ticker}")
     if data is None:
         return {"error": "Kalshi unavailable or no credentials"}
@@ -193,6 +206,7 @@ def get_market(ticker: str) -> dict:
         if bids and asks:
             market["last_price"] = (max(bids) + min(asks)) / 2
 
+    _MARKET_CACHE[ticker] = (time.time(), market)
     return market
 
 
@@ -239,6 +253,7 @@ def _candlestick_price(ticker: str, unix_ts: int, lookback_mins: int) -> Optiona
 def get_market_trend(ticker: str, unix_ts: int, lookback_mins: int = 2) -> dict:
     """
     Return YES price trend in the window ending at unix_ts.
+    Results are cached for 10 s to avoid redundant API calls.
 
     Returns:
         {current_price, open_price, price_change, trend, trades_in_window}
@@ -246,6 +261,12 @@ def get_market_trend(ticker: str, unix_ts: int, lookback_mins: int = 2) -> dict:
     """
     if not unix_ts:
         return {}
+
+    cache_key = f"{ticker}:{unix_ts}:{lookback_mins}"
+    if cache_key in _TREND_CACHE:
+        ts, cached = _TREND_CACHE[cache_key]
+        if time.time() - ts < _TREND_TTL:
+            return cached
 
     min_ts = unix_ts - lookback_mins * 60
     print(f"[kalshi] get_market_trend ticker={ticker} window=[{min_ts}, {unix_ts}] ({lookback_mins}min lookback)")
@@ -260,13 +281,15 @@ def get_market_trend(ticker: str, unix_ts: int, lookback_mins: int = 2) -> dict:
         if prices:
             open_price, close_price = prices
             change = round(close_price - open_price, 3)
-            return {
+            result = {
                 "current_price":    close_price,
                 "open_price":       open_price,
                 "price_change":     change,
                 "trend":            "rising" if change > 0.01 else "falling" if change < -0.01 else "flat",
                 "trades_in_window": 0,
             }
+            _TREND_CACHE[cache_key] = (time.time(), result)
+            return result
         return {}
 
     trades = data.get("trades", [])
@@ -297,4 +320,5 @@ def get_market_trend(ticker: str, unix_ts: int, lookback_mins: int = 2) -> dict:
     else:
         result["trend"] = "flat"
 
+    _TREND_CACHE[cache_key] = (time.time(), result)
     return result

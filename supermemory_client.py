@@ -22,6 +22,52 @@ from typing import Optional
 from supermemory import Supermemory
 
 
+# ── In-memory caches ─────────────────────────────────────────────────────────
+# Static pregame data: populated once per load_game(), served during live play
+# key = game_tag → {"home_chunks", "away_chunks", "game_chunks", "h_tag", "a_tag"}
+_PREGAME_CACHE: dict[str, dict] = {}
+
+# TTL cache for events container semantic queries (avoids repeated API hits)
+_EVENT_QUERY_CACHE: dict[str, tuple[float, list[str]]] = {}
+_EVENT_CACHE_TTL = 30  # seconds
+
+
+def _get_cached_events(key: str) -> list[str] | None:
+    if key in _EVENT_QUERY_CACHE:
+        ts, chunks = _EVENT_QUERY_CACHE[key]
+        if _time.time() - ts < _EVENT_CACHE_TTL:
+            return chunks
+        del _EVENT_QUERY_CACHE[key]
+    return None
+
+
+def _set_cached_events(key: str, chunks: list[str]) -> None:
+    _EVENT_QUERY_CACHE[key] = (_time.time(), chunks)
+
+
+def clear_cache(game_tag: str | None = None) -> None:
+    """Clear cached pregame data.  If game_tag is given, clear only that game."""
+    if game_tag:
+        _PREGAME_CACHE.pop(game_tag, None)
+    else:
+        _PREGAME_CACHE.clear()
+    _EVENT_QUERY_CACHE.clear()
+
+
+# ── Low-impact event detection ────────────────────────────────────────────────
+_LOW_IMPACT_RE = re.compile(
+    r"\b(timeout|time.?out|substitution|sub(?:bed)? (?:in|out)|"
+    r"dead.?ball|jump ball|official review|media timeout|tv timeout|"
+    r"end of (?:period|half|quarter)|clock (?:adjust|stop|start))\b",
+    re.IGNORECASE,
+)
+
+
+def is_low_impact_event(event: str) -> bool:
+    """True for events unlikely to shift momentum (timeouts, subs, etc.)."""
+    return bool(_LOW_IMPACT_RE.search(event))
+
+
 # ── Container naming ──────────────────────────────────────────────────────────
 
 def _slug(text: str) -> str:
@@ -84,26 +130,33 @@ def _parse_rules(context: str) -> list[str]:
     return rules
 
 
-def _store_rules(sm, context, team_name, container_tags, role):
+def _store_rules(sm, context, team_name, container_tags, role) -> list[str]:
     """Only store lines containing → (actual event-weighting rules).
-    Baseline narrative sentences are excluded — they're descriptions, not rules."""
+    Baseline narrative sentences are excluded — they're descriptions, not rules.
+    Returns the list of content strings that were stored."""
     slug = _slug(team_name)
     rules = [line for line in _parse_rules(context) if "→" in line]
+    stored: list[str] = []
     for i, line in enumerate(rules):
+        content = f"{team_name}: {line}"
         try:
             sm.add(
-                content=f"{team_name}: {line}",
+                content=content,
                 container_tags=container_tags,
                 custom_id=f"{slug}-rule-{i:02d}",
                 metadata={"team": team_name, "role": role, "type": "team_rule"},
             )
         except Exception:
             pass
+        stored.append(content)
+    return stored
 
 
-def _store_player_profiles(sm, team_name: str, players: list, container_tags: list, role: str) -> None:
-    """Store each player's stats as a searchable profile document in Supermemory."""
+def _store_player_profiles(sm, team_name: str, players: list, container_tags: list, role: str) -> list[str]:
+    """Store each player's stats as a searchable profile document in Supermemory.
+    Returns the list of content strings that were stored."""
     slug = _slug(team_name)
+    stored: list[str] = []
     for player in players:
         name    = player.get("name", "Unknown")
         pos     = player.get("position") or "?"
@@ -132,10 +185,14 @@ def _store_player_profiles(sm, team_name: str, players: list, container_tags: li
             )
         except Exception:
             pass
+        stored.append(content)
+    return stored
 
 
-def _store_game_rules(sm, context, home_name, away_name, g_tag):
+def _store_game_rules(sm, context, home_name, away_name, g_tag) -> list[str]:
+    """Returns the list of content strings that were stored."""
     slug = _slug(f"{home_name}-vs-{away_name}")
+    stored: list[str] = []
     for i, line in enumerate(_parse_rules(context)):
         try:
             sm.add(
@@ -146,6 +203,8 @@ def _store_game_rules(sm, context, home_name, away_name, g_tag):
             )
         except Exception:
             pass
+        stored.append(line)
+    return stored
 
 
 def _extract_chunks(result, top_k: int) -> list[str]:
@@ -185,29 +244,34 @@ def load_game(home_team: str, away_team: str, game_date: str | None = None) -> d
     e_tag          = events_container(g_tag)
 
     # Team rules → both team container (persistent) and game container (scoped)
-    _store_rules(sm, home_ctx["context"], resolved_home, [h_tag, g_tag], "home")
-    _store_rules(sm, away_ctx["context"], resolved_away, [a_tag, g_tag], "away")
+    home_rules = _store_rules(sm, home_ctx["context"], resolved_home, [h_tag, g_tag], "home")
+    away_rules = _store_rules(sm, away_ctx["context"], resolved_away, [a_tag, g_tag], "away")
 
     # Game context rules → game container only
-    _store_game_rules(sm, game_ctx["context"], resolved_home, resolved_away, g_tag)
+    game_rules = _store_game_rules(sm, game_ctx["context"], resolved_home, resolved_away, g_tag)
 
     # Player profiles → both team container (persistent) and game container (scoped)
     home_players = home_ctx.get("players", [])
     away_players = away_ctx.get("players", [])
 
-    def _store_home_players():
-        _store_player_profiles(sm, resolved_home, home_players, [h_tag, g_tag], "home")
-
-    def _store_away_players():
-        _store_player_profiles(sm, resolved_away, away_players, [a_tag, g_tag], "away")
-
     with ThreadPoolExecutor(max_workers=2) as pool:
-        home_pf = pool.submit(_store_home_players)
-        away_pf = pool.submit(_store_away_players)
-        home_pf.result()
-        away_pf.result()
+        home_pf = pool.submit(_store_player_profiles, sm, resolved_home, home_players, [h_tag, g_tag], "home")
+        away_pf = pool.submit(_store_player_profiles, sm, resolved_away, away_players, [a_tag, g_tag], "away")
+        home_profiles = home_pf.result()
+        away_profiles = away_pf.result()
 
     print(f"  Players : {len(home_players)} home + {len(away_players)} away profiles stored")
+
+    # Cache all pregame data in memory for fast retrieval during live play
+    _PREGAME_CACHE[g_tag] = {
+        "home_chunks": home_rules + home_profiles,
+        "away_chunks": away_rules + away_profiles,
+        "game_chunks": game_rules,
+        "h_tag": h_tag,
+        "a_tag": a_tag,
+    }
+    total_cached = len(home_rules) + len(away_rules) + len(home_profiles) + len(away_profiles) + len(game_rules)
+    print(f"  Cache   : {total_cached} chunks cached in memory (skips 3 API calls per /live)")
 
     # Seed the events container so it exists before the first add-event call
     try:
@@ -396,7 +460,11 @@ def retrieve_context(
     top_k: int = 3,
 ) -> dict:
     """
-    Query all four Supermemory containers in parallel and return raw sections.
+    Query Supermemory containers and return raw sections.
+
+    Uses in-memory cache for static pregame data (team rules, player profiles,
+    game context) so only the events container is queried live.  Events queries
+    are also TTL-cached to avoid repeated hits for similar plays.
 
     Returns a dict with keys:
         recent_events   — chronological buffer passed in (not from Supermemory)
@@ -407,34 +475,60 @@ def retrieve_context(
         home_team       — display name derived from h_tag
         away_team       — display name derived from a_tag
     """
-    sm = _sm()
     t0 = _time.time()
-    print(f"[supermemory] querying 4 containers for: {observed_event!r:.60}")
+    cached = _PREGAME_CACHE.get(game_tag)
 
-    def _query(tag: str, k: int) -> list[str]:
-        t1 = _time.time()
-        try:
-            result = sm.profile(container_tag=tag, q=observed_event)
-            chunks = _extract_chunks(result, k)
-            print(f"[supermemory] {tag!r:.40} → {len(chunks)} chunks — {_time.time()-t1:.1f}s", flush=True)
-            return chunks
-        except Exception as e:
-            print(f"[supermemory] {tag!r:.40} → error: {e} — {_time.time()-t1:.1f}s", flush=True)
-            return []
+    if cached:
+        # ── Fast path: static data from memory, only query events ────────
+        home_chunks = cached["home_chunks"]
+        away_chunks = cached["away_chunks"]
+        game_chunks = cached["game_chunks"]
+        print(f"[supermemory] pregame cache HIT ({len(home_chunks)}+{len(away_chunks)}+{len(game_chunks)} chunks)", flush=True)
 
-    # Use top_k * 2 for team containers so we surface both player profiles and team rules
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        events_f = pool.submit(_query, e_tag,    top_k * 2)
-        game_f   = pool.submit(_query, game_tag, top_k)
-        home_f   = pool.submit(_query, h_tag,    top_k * 2)
-        away_f   = pool.submit(_query, a_tag,    top_k * 2)
+        # Events container: check TTL cache, then API
+        event_cache_key = f"{e_tag}:{observed_event}"
+        semantic_events = _get_cached_events(event_cache_key)
+        if semantic_events is not None:
+            print(f"[supermemory] events cache HIT — {len(semantic_events)} chunks — {_time.time()-t0:.2f}s", flush=True)
+        else:
+            sm = _sm()
+            t1 = _time.time()
+            try:
+                result = sm.profile(container_tag=e_tag, q=observed_event)
+                semantic_events = _extract_chunks(result, top_k * 2)
+                _set_cached_events(event_cache_key, semantic_events)
+                print(f"[supermemory] events query → {len(semantic_events)} chunks — {_time.time()-t1:.1f}s", flush=True)
+            except Exception as e:
+                print(f"[supermemory] events query error: {e} — {_time.time()-t1:.1f}s", flush=True)
+                semantic_events = []
+    else:
+        # ── Cold path: no pregame cache, query all 4 containers ──────────
+        sm = _sm()
+        print(f"[supermemory] pregame cache MISS — querying all 4 containers for: {observed_event!r:.60}")
 
-        semantic_events = events_f.result()
-        game_chunks     = game_f.result()
-        home_chunks     = home_f.result()
-        away_chunks     = away_f.result()
+        def _query(tag: str, k: int) -> list[str]:
+            t1 = _time.time()
+            try:
+                result = sm.profile(container_tag=tag, q=observed_event)
+                chunks = _extract_chunks(result, k)
+                print(f"[supermemory] {tag!r:.40} → {len(chunks)} chunks — {_time.time()-t1:.1f}s", flush=True)
+                return chunks
+            except Exception as e:
+                print(f"[supermemory] {tag!r:.40} → error: {e} — {_time.time()-t1:.1f}s", flush=True)
+                return []
 
-    print(f"[supermemory] all 4 queries done — {_time.time()-t0:.1f}s", flush=True)
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            events_f = pool.submit(_query, e_tag,    top_k * 2)
+            game_f   = pool.submit(_query, game_tag, top_k)
+            home_f   = pool.submit(_query, h_tag,    top_k * 2)
+            away_f   = pool.submit(_query, a_tag,    top_k * 2)
+
+            semantic_events = events_f.result()
+            game_chunks     = game_f.result()
+            home_chunks     = home_f.result()
+            away_chunks     = away_f.result()
+
+    print(f"[supermemory] retrieve_context done — {_time.time()-t0:.2f}s", flush=True)
 
     # Split team chunks: player profiles (prefixed) vs stat-derived rules
     seen: set[str] = set()

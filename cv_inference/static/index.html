@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CV Inference</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="layout">
+  <div class="left">
+    <div class="title-bar">
+      <div class="title">CV Inference</div>
+      <div class="model-selector">
+        <button class="model-btn" id="btn-yolo" onclick="setModel('yolo')">YOLO</button>
+        <button class="model-btn active" id="btn-sam2" onclick="setModel('sam2')">RF-DETR + SAM2</button>
+      </div>
+    </div>
+    <div class="video-container">
+      <video id="video" controls>
+        <source src="/video" type="video/mp4">
+      </video>
+      <canvas id="overlayCanvas"></canvas>
+    </div>
+    <div class="bar">
+      <button id="captureBtn" onclick="manualCapture()">Capture</button>
+      <label class="auto-label" id="autoLabel">
+        <input type="checkbox" id="autoCheck" onchange="toggleAuto()"> Auto
+      </label>
+      <label class="auto-label" id="boxLabel">
+        <input type="checkbox" id="boxCheck" checked onchange="toggleBoxes()"> Boxes
+      </label>
+      <label class="auto-label" id="trailLabel">
+        <input type="checkbox" id="trailCheck" checked onchange="toggleTrails()"> Trails
+      </label>
+      <label class="auto-label" id="ballLabel">
+        <input type="checkbox" id="ballCheck" checked onchange="toggleBall()"> Ball
+      </label>
+      <label class="auto-label" id="maskLabel">
+        <input type="checkbox" id="maskCheck" checked onchange="toggleMasks()"> Masks
+      </label>
+      <span class="ts" id="tsDisplay">0:00.0</span>
+    </div>
+    <div class="stats">
+      inflight: <span class="s-val" id="inflightCount">0</span>
+      &nbsp; done: <span class="s-val" id="doneCount">0</span>
+      &nbsp; skipped: <span class="s-val" id="skippedCount">0</span>
+      &nbsp; fps: <span class="s-val" id="inferFps">0</span>
+      &nbsp; people: <span class="s-val" id="peopleCount">0</span>
+      &nbsp; model: <span class="s-val" id="modelLabel">sam2</span>
+    </div>
+    <div class="court-section">
+      <div class="court-head">
+        <span>Court View</span>
+        <div class="court-btns">
+          <button onclick="autoDetectCourt()">Detect</button>
+          <button id="calibBtn" onclick="startCalibration()">Calibrate</button>
+          <button onclick="resetCourt()">Reset</button>
+        </div>
+      </div>
+      <canvas id="courtCanvas"></canvas>
+      <div class="court-info" id="courtInfo">Set court corners to enable minimap</div>
+    </div>
+  </div>
+  <div class="right">
+    <div class="log-head">
+      <span>Detections</span>
+      <div class="log-head-btns">
+        <button onclick="clearLog()">Clear</button>
+      </div>
+    </div>
+    <div class="summary-panel" id="summaryPanel"></div>
+    <div class="movement-panel" id="movementPanel"></div>
+    <div class="entries" id="logEntries"></div>
+  </div>
+</div>
+<canvas id="canvas" style="display:none;"></canvas>
+<script src="/static/app.js"></script>
+</body>
+</html>

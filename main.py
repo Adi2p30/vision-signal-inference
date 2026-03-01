@@ -3,29 +3,24 @@ import csv
 import json
 import os
 import re
-import time as _time
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 import httpx
 import uvicorn
 from openai import AsyncOpenAI
-from pydantic import BaseModel
 
 load_dotenv()
 
 import positions_manager
-import events_store
-from supermemory_client import load_game, add_game_event, retrieve_context, synthesize_momentum
-from kalshi_client import get_market, get_market_trend
-from trading_agent import generate_trading_signal
+from routes.pregame import router as pregame_router
+from routes.live import router as live_router
+from routes.backtest import router as backtest_router
 
 # Environment variables (with defaults)
 GAME_ID = os.environ.get("GAME_ID", "26feb09arizku")
@@ -118,186 +113,12 @@ app.add_middleware(
 )
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
-
 # ---------------------------------------------------------------------------
-# Decision-agent models
+# Register route modules (decision-agent endpoints)
 # ---------------------------------------------------------------------------
-
-class PregameRequest(BaseModel):
-    home_team: str
-    away_team: str
-    game_date: Optional[str] = None
-
-
-class PregameResponse(BaseModel):
-    game_tag: str
-    h_tag: str
-    a_tag: str
-    e_tag: str
-    home_team: str
-    away_team: str
-
-
-class LiveRequest(BaseModel):
-    game_tag: str
-    h_tag: str
-    a_tag: str
-    e_tag: str
-    event: str
-    game_time: Optional[str] = None
-    sequence: int = 0
-    market_tickers: list[str]
-    current_time: int
-
-
-class MarketSignal(BaseModel):
-    market_ticker: str
-    yes_price: Optional[float] = None
-    trend: str
-    signal: str
-    action_taken: Optional[str] = None
-    order_id: Optional[str] = None
-
-
-class LiveResponse(BaseModel):
-    event: str
-    analysis: str
-    market_signals: list[MarketSignal]
-
-
-# ---------------------------------------------------------------------------
-# Decision-agent endpoints
-# ---------------------------------------------------------------------------
-
-@app.post("/pregame", response_model=PregameResponse)
-async def pregame(request: PregameRequest):
-    if not request.home_team.strip() or not request.away_team.strip():
-        raise HTTPException(status_code=400, detail="'home_team' and 'away_team' must not be empty.")
-    try:
-        tags = await asyncio.to_thread(
-            load_game,
-            request.home_team.strip(),
-            request.away_team.strip(),
-            request.game_date,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Pregame setup failed: {e}")
-    return PregameResponse(
-        game_tag=tags["game_tag"],
-        h_tag=tags["h_tag"],
-        a_tag=tags["a_tag"],
-        e_tag=tags["e_tag"],
-        home_team=request.home_team.strip(),
-        away_team=request.away_team.strip(),
-    )
-
-
-def _parse_action(signal: str) -> str:
-    m = re.search(r"ACTION:\s*(BUY YES|BUY NO|SELL YES|SELL NO|HOLD)", signal, re.IGNORECASE)
-    return m.group(1).upper() if m else "HOLD"
-
-
-@app.post("/live", response_model=LiveResponse)
-async def live(request: LiveRequest):
-    if not request.event.strip():
-        raise HTTPException(status_code=400, detail="'event' must not be empty.")
-    if not request.market_tickers:
-        raise HTTPException(status_code=400, detail="'market_tickers' must not be empty.")
-
-    event = request.event.strip()
-    tickers = request.market_tickers
-    t_start = _time.time()
-    print(f"[live] START event={event!r} tickers={tickers}", flush=True)
-
-    time_str = request.game_time or "?"
-    entry = f"[{time_str}] #{request.sequence:04d} {event}"
-    try:
-        await asyncio.to_thread(
-            add_game_event, request.e_tag, event, request.game_time, request.sequence
-        )
-    except Exception as e:
-        print(f"[live] add_game_event failed: {e}", flush=True)
-    events_store.push_event(request.e_tag, entry)
-
-    recent = events_store.get_recent(request.e_tag)
-
-    def _fetch_all():
-        with ThreadPoolExecutor(max_workers=3 + len(tickers)) as pool:
-            analysis_f = pool.submit(
-                lambda: synthesize_momentum(
-                    event,
-                    retrieve_context(
-                        request.game_tag, event,
-                        request.h_tag, request.a_tag, request.e_tag, recent,
-                    ),
-                )
-            )
-            trend_fs = [pool.submit(get_market_trend, t, request.current_time) for t in tickers]
-            market_fs = [pool.submit(get_market, t) for t in tickers]
-            positions_f = pool.submit(
-                positions_manager.format_positions_context,
-                tickers[0] if len(tickers) == 1 else "",
-            )
-            trends = [f.result() for f in trend_fs]
-            markets = [f.result() for f in market_fs]
-            positions_ctx = positions_f.result()
-            analysis = analysis_f.result()
-            return analysis, trends, markets, positions_ctx
-
-    try:
-        analysis, trends, markets, positions_ctx = await asyncio.to_thread(_fetch_all)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Context fetch failed: {e}")
-
-    titles = [
-        m.get("title", t) if isinstance(m, dict) and "error" not in m else t
-        for t, m in zip(tickers, markets)
-    ]
-
-    positions_state = positions_manager.load()
-
-    def _gen_signals():
-        with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
-            futs = [
-                pool.submit(generate_trading_signal, t, title, trend, analysis, positions_ctx, positions_state)
-                for t, title, trend in zip(tickers, titles, trends)
-            ]
-            return [f.result() for f in futs]
-
-    signals = await asyncio.to_thread(_gen_signals)
-
-    market_signals: list[MarketSignal] = []
-    current_positions = positions_manager.load().get("positions", {})
-    _CONTRACTS_PER_TRADE = 10
-
-    for ticker, trend, signal in zip(tickers, trends, signals):
-        price = trend.get("current_price")
-        action = _parse_action(signal)
-
-        if action.startswith("SELL"):
-            held = current_positions.get(ticker)
-            sell_side = "yes" if "YES" in action else "no"
-            if not held or held.get("side") != sell_side or held.get("contracts", 0) <= 0:
-                action = "HOLD"
-
-        order_id: Optional[str] = None
-        if action != "HOLD" and price is not None:
-            order_id = positions_manager.record_trade(ticker, action, _CONTRACTS_PER_TRADE, price)
-            current_positions = positions_manager.load().get("positions", {})
-
-        market_signals.append(MarketSignal(
-            market_ticker=ticker,
-            yes_price=price,
-            trend=trend.get("trend", "unknown"),
-            signal=signal,
-            action_taken=action,
-            order_id=order_id,
-        ))
-
-    print(f"[live] done — {_time.time()-t_start:.1f}s total", flush=True)
-    return LiveResponse(event=event, analysis=analysis, market_signals=market_signals)
+app.include_router(pregame_router)
+app.include_router(live_router)
+app.include_router(backtest_router)
 
 
 @app.get("/positions")

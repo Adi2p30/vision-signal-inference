@@ -13,7 +13,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
-from supermemory_client import add_game_event, retrieve_context, synthesize_momentum
+from supermemory_client import add_game_event, retrieve_context, synthesize_momentum, is_low_impact_event
 from kalshi_client import get_market, get_market_trend
 from trading_agent import generate_trading_signal
 import positions_manager
@@ -59,19 +59,52 @@ async def live(request: LiveRequest):
     t_start = time.time()
     print(f"[live] START event={event!r} tickers={tickers}", flush=True)
 
-    # Step 1: store the event (Supermemory + local buffer)
+    # Step 1: store the event — fire-and-forget to Supermemory, sync to local buffer
     time_str = request.game_time or "?"
     entry    = f"[{time_str}] #{request.sequence:04d} {event}"
-    try:
-        await asyncio.to_thread(
-            add_game_event, request.e_tag, event, request.game_time, request.sequence
-        )
-    except Exception as e:
-        print(f"[live] add_game_event failed: {e}", flush=True)
-    events_store.push_event(request.e_tag, entry)
 
+    async def _bg_store():
+        try:
+            await asyncio.to_thread(
+                add_game_event, request.e_tag, event, request.game_time, request.sequence
+            )
+        except Exception as e:
+            print(f"[live] add_game_event failed (background): {e}", flush=True)
+
+    asyncio.create_task(_bg_store())           # fire-and-forget
+    events_store.push_event(request.e_tag, entry)  # local buffer is synchronous
     recent = events_store.get_recent(request.e_tag)
-    print(f"[live] event stored, {len(recent)} in buffer — {time.time()-t_start:.1f}s", flush=True)
+    print(f"[live] event buffered, {len(recent)} in buffer — {time.time()-t_start:.1f}s", flush=True)
+
+    # ── Fast path: low-impact events (timeouts, subs, etc.) → skip synthesis ─
+    if is_low_impact_event(event):
+        print("[live] low-impact event — skipping synthesis, auto HOLD", flush=True)
+        analysis = (
+            "MOMENTUM: NEUTRAL (=) neutral\n"
+            f"SCORING RUN: N/A — low-impact event\n"
+            f"SITUATION: {event} — no momentum shift expected.\n"
+            "KEY RULE: None\nKEY PLAYER: None"
+        )
+
+        def _fetch_trends_only():
+            with ThreadPoolExecutor(max_workers=len(tickers)) as pool:
+                fs = [pool.submit(get_market_trend, t, request.current_time) for t in tickers]
+                return [f.result() for f in fs]
+
+        trends = await asyncio.to_thread(_fetch_trends_only)
+        hold_signal = "ACTION: HOLD\nCONFIDENCE: LOW\nREASONING: Low-impact event — no momentum shift."
+        market_signals = [
+            MarketSignal(
+                market_ticker=t, yes_price=tr.get("current_price"),
+                trend=tr.get("trend", "unknown"), signal=hold_signal,
+                action_taken="HOLD", order_id=None,
+            )
+            for t, tr in zip(tickers, trends)
+        ]
+        print(f"[live] done (fast path) — {time.time()-t_start:.1f}s total", flush=True)
+        return LiveResponse(event=event, analysis=analysis, market_signals=market_signals)
+
+    # ── Full path: momentum synthesis + trading signals ──────────────────────
 
     # Step 2 (parallel): context + market trends + market titles + positions
     def _fetch_all():
