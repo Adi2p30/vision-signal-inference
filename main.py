@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import csv
+import json
 import re
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,7 +28,11 @@ def parse_args():
     parser.add_argument("--score-endpoint", default="", help="Modal score VLM endpoint URL (enables dual-VLM mode)")
     parser.add_argument("--model", default="Qwen/Qwen3-VL-8B-Instruct", help="Model name served by vLLM")
     parser.add_argument("--port", type=int, default=8080, help="Local web UI port (default: 8080)")
-    return parser.parse_args()
+    args = parser.parse_args()
+    # Guard against non-breaking spaces from copy-paste (U+00A0 -> regular space)
+    args.endpoint = args.endpoint.replace('\u00a0', ' ').strip()
+    args.score_endpoint = args.score_endpoint.replace('\u00a0', ' ').strip()
+    return args
 
 
 @asynccontextmanager
@@ -45,6 +50,31 @@ async def lifespan(app: FastAPI):
     app.state.score_endpoint = args.score_endpoint
     app.state.score_http = httpx.AsyncClient(timeout=httpx.Timeout(60.0)) if args.score_endpoint else None
 
+    # Extract team names from PBP data
+    pbp_path = data_dir / f"pbp-{args.id}.json"
+    away_name, home_name = "Away", "Home"
+    away_abbr, home_abbr = "AWAY", "HOME"
+    if pbp_path.exists():
+        with open(pbp_path) as f:
+            pbp_data = json.load(f)
+        header = pbp_data.get("header", {})
+        comps = header.get("competitions", [])
+        if comps and "competitors" in comps[0]:
+            for c in comps[0]["competitors"]:
+                team = c.get("team", {})
+                if c.get("homeAway") == "away":
+                    away_name = team.get("displayName", "Away")
+                    away_abbr = team.get("abbreviation", "AWAY")
+                elif c.get("homeAway") == "home":
+                    home_name = team.get("displayName", "Home")
+                    home_abbr = team.get("abbreviation", "HOME")
+
+    # team_a = away (left on scoreboard), team_b = home (right on scoreboard)
+    app.state.team_a_name = away_name
+    app.state.team_a_abbr = away_abbr
+    app.state.team_b_name = home_name
+    app.state.team_b_abbr = home_abbr
+
     # Game state for flag evaluation + clock self-correction
     app.state.game = {
         "score_a": 0,
@@ -58,8 +88,8 @@ async def lifespan(app: FastAPI):
         "outlier_count": 0,          # consecutive rejected frames
     }
 
-    assert(args.score_endpoint)
-    print(f"Game ID: {args.id}")
+    mode = "dual VLM" if args.score_endpoint else "single VLM"
+    print(f"Game ID: {args.id} — {away_abbr} @ {home_abbr} [{mode}]")
 
     yield
 
@@ -151,14 +181,14 @@ def validate_clock(gs, vlm_clock, video_ts, vlm_period=None):
         return corrected, False
 
 
-def evaluate_flags(gs):
+def evaluate_flags(gs, team_a_abbr="AWAY", team_b_abbr="HOME"):
     """Check game conditions and return active flags."""
     flags = []
     sa, sb = gs["score_a"], gs["score_b"]
     clock = gs["clock_seconds"]
     period = gs["period"]
     lead = abs(sa - sb)
-    leader = "Team A" if sa > sb else ("Team B" if sb > sa else None)
+    leader = team_a_abbr if sa > sb else (team_b_abbr if sb > sa else None)
 
     # Flag: 6+ point lead with <=90s left in 2nd half
     if period == 2 and clock is not None and clock <= 90 and lead >= 6 and leader:
@@ -172,7 +202,7 @@ def evaluate_flags(gs):
     return flags
 
 
-def process_score(gs, score_csv, video_ts):
+def process_score(gs, score_csv, video_ts, team_a_abbr="AWAY", team_b_abbr="HOME"):
     """Parse dual-VLM score CSV, validate clock, evaluate flags.
 
     Returns (flags, clock_correction).
@@ -211,7 +241,7 @@ def process_score(gs, score_csv, video_ts):
         "accepted": accepted,
         "outlier_streak": gs["outlier_count"],
     }
-    return evaluate_flags(gs), clock_correction
+    return evaluate_flags(gs, team_a_abbr, team_b_abbr), clock_correction
 
 
 MOMENTUM_PROMPT = (
@@ -229,13 +259,15 @@ LEGACY_PROMPT = (
     "/no_think\n"
     "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
     "If you cannot see the scoreboard or game clock clearly, output exactly: NONE\n"
-    "Columns: timestamp,action,team_a_score,team_b_score,game_clock,momentum_team,momentum_score,momentum_reason\n"
+    "Columns: timestamp,action,team_a_score,team_b_score,game_clock,period,momentum_team,momentum_score,momentum_reason\n"
     "- action: <=10 tokens\n"
-    "- game_clock: countdown timer shown on screen, format MM:SS (e.g. 14:32, 03:07)\n"
+    "- game_clock: countdown timer shown on screen, format M:SS or MM:SS exactly as displayed (e.g. 14:32, 3:07, 0:48)\n"
+    "- period: current half/period number shown on scoreboard (1 or 2)\n"
     "- momentum_team: team_A/team_B/neutral\n"
     "- momentum_score: -5 to +5\n"
     "- momentum_reason: 1-5 tokens\n"
-    "Example: 12.0,fast break layup scored,45,42,14:32,team_A,3,quick transition"
+    "Example: 12.0,fast break layup scored,45,42,14:32,2,team_A,3,quick transition\n"
+    "Example under 1 min: 12.0,free throw made,52,50,0:48,2,team_A,2,clutch free throws"
 )
 
 
@@ -252,7 +284,6 @@ async def serve_video(request: Request):
 @app.get("/play-by-play")
 async def play_by_play(request: Request):
     """Return scoring-relevant plays with (awayScore, homeScore, wallclock)."""
-    import json
     summary_path = Path(__file__).parent / "data" / f"pbp-{request.app.state.game_id}.json"
     with open(summary_path) as f:
         data = json.load(f)
@@ -280,7 +311,7 @@ async def price_history(request: Request):
                 if col == "timestamp":
                     continue
                 val = row[col]
-                entry[col.lower()] = float(val) if val else None
+                entry[col] = float(val) if val else None
             rows.append(entry)
     return JSONResponse(rows)
 
@@ -289,18 +320,22 @@ async def price_history(request: Request):
 async def flags(request: Request):
     """Return current game state and active flags."""
     gs = request.app.state.game
-    return {"game_state": gs, "flags": evaluate_flags(gs)}
+    return {"game_state": gs, "flags": evaluate_flags(gs, request.app.state.team_a_abbr, request.app.state.team_b_abbr)}
 
 
 @app.get("/config")
 async def config(request: Request):
-    """Tell the frontend which mode we're running in."""
-    return {"dual_vlm": bool(request.app.state.score_endpoint)}
+    """Tell the frontend which mode we're running in + team info."""
+    s = request.app.state
+    return {
+        "dual_vlm": bool(s.score_endpoint),
+        "team_a": {"name": s.team_a_name, "abbr": s.team_a_abbr},
+        "team_b": {"name": s.team_b_name, "abbr": s.team_b_abbr},
+    }
 
 
 @app.get("/candlesticks")
 async def candlesticks(request: Request):
-    import json
     cs_path = Path(__file__).parent / "data" / f"candlesticks-{request.app.state.game_id}.json"
     with open(cs_path) as f:
         data = json.load(f)
@@ -344,11 +379,11 @@ async def infer(request: Request):
 
         try:
             momentum, score_val = await asyncio.gather(get_momentum(), get_score())
-            flags, clock_correction = process_score(state.game, score_val, timestamp)
+            flag_list, clock_correction = process_score(state.game, score_val, timestamp, state.team_a_abbr, state.team_b_abbr)
             return {
                 "momentum": momentum or "NONE",
                 "score": score_val or "NONE",
-                "flags": flags,
+                "flags": flag_list,
                 "clock_correction": clock_correction,
             }
         except Exception as e:
