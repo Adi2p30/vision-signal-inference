@@ -1,4 +1,4 @@
 data/*.mp4
 .venv
 yolo26s.pt
-
+.envrc
