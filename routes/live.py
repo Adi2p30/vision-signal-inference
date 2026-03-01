@@ -22,7 +22,7 @@ from models import LiveRequest, LiveResponse, MarketSignal
 
 router = APIRouter()
 
-_CONTRACTS_PER_TRADE = 10
+_BUY_FRACTION = 0.05  # risk 5% of buying power per trade
 
 
 def _parse_action(signal: str) -> str:
@@ -140,10 +140,21 @@ async def live(request: LiveRequest):
                 action = "HOLD"
 
         order_id: Optional[str] = None
+        contracts = 0
         if action != "HOLD" and price is not None:
-            order_id = positions_manager.record_trade(ticker, action, _CONTRACTS_PER_TRADE, price)
+            if action.startswith("BUY"):
+                bp = positions_manager.get_buying_power()
+                contracts = int(bp * _BUY_FRACTION / price) if price > 0 else 0
+                if contracts <= 0:
+                    action = "HOLD"
+            else:
+                held = current_positions.get(ticker)
+                contracts = held["contracts"] if held else 0
+
+        if action != "HOLD" and price is not None and contracts > 0:
+            order_id = positions_manager.record_trade(ticker, action, contracts, price)
             current_positions = positions_manager.load().get("positions", {})
-            print(f"[live] {action} {_CONTRACTS_PER_TRADE}x {ticker} @ {price:.2f} → {order_id}", flush=True)
+            print(f"[live] {action} {contracts}x {ticker} @ {price:.2f} → {order_id}", flush=True)
 
         market_signals.append(MarketSignal(
             market_ticker = ticker,

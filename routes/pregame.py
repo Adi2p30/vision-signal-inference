@@ -14,6 +14,7 @@ from models import PregameRequest, PregameResponse
 
 router = APIRouter()
 
+_cache_pregame = None
 
 @router.post("/pregame", response_model=PregameResponse)
 async def pregame(request: PregameRequest):
@@ -30,6 +31,11 @@ async def pregame(request: PregameRequest):
     if not request.home_team.strip() or not request.away_team.strip():
         raise HTTPException(status_code=400, detail="'home_team' and 'away_team' must not be empty.")
 
+    global _cache_pregame
+
+    if _cache_pregame is not None:
+        return _cache_pregame
+
     try:
         tags = await asyncio.to_thread(
             load_game,
@@ -42,7 +48,8 @@ async def pregame(request: PregameRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Pregame setup failed: {e}")
 
-    return PregameResponse(
+
+    _cache_pregame = PregameResponse(
         game_tag   = tags["game_tag"],
         h_tag      = tags["h_tag"],
         a_tag      = tags["a_tag"],
@@ -50,3 +57,10 @@ async def pregame(request: PregameRequest):
         home_team  = request.home_team.strip(),
         away_team  = request.away_team.strip(),
     )
+
+    print("Pregame setup complete.", _cache_pregame.model_dump_json())
+    print(f"Pregame setup complete for {request.home_team} vs {request.away_team} on {request.game_date or 'today'}")
+
+
+    return _cache_pregame
+    

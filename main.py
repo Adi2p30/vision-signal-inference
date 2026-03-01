@@ -165,6 +165,23 @@ class LiveResponse(BaseModel):
     market_signals: list[MarketSignal]
 
 
+class TradeRequest(BaseModel):
+    ticker: str
+    side: str          # "yes" or "no"
+    contracts: int
+    price: float
+
+
+class TradeResponse(BaseModel):
+    order_id: str
+    ticker: str
+    action: str
+    side: str
+    contracts: int
+    price: float
+    buying_power: float
+
+
 # ---------------------------------------------------------------------------
 # Decision-agent endpoints
 # ---------------------------------------------------------------------------
@@ -270,7 +287,7 @@ async def live(request: LiveRequest):
 
     market_signals: list[MarketSignal] = []
     current_positions = positions_manager.load().get("positions", {})
-    _CONTRACTS_PER_TRADE = 10
+    _BUY_FRACTION = 0.05  # risk 5% of buying power per trade
 
     for ticker, trend, signal in zip(tickers, trends, signals):
         price = trend.get("current_price")
@@ -284,7 +301,17 @@ async def live(request: LiveRequest):
 
         order_id: Optional[str] = None
         if action != "HOLD" and price is not None:
-            order_id = positions_manager.record_trade(ticker, action, _CONTRACTS_PER_TRADE, price)
+            if action.startswith("BUY"):
+                bp = positions_manager.get_buying_power()
+                contracts = int(bp * _BUY_FRACTION / price) if price > 0 else 0
+                if contracts <= 0:
+                    action = "HOLD"
+            else:
+                held = current_positions.get(ticker)
+                contracts = held["contracts"] if held else 0
+
+        if action != "HOLD" and price is not None and contracts > 0:
+            order_id = positions_manager.record_trade(ticker, action, contracts, price)
             current_positions = positions_manager.load().get("positions", {})
 
         market_signals.append(MarketSignal(
@@ -303,6 +330,86 @@ async def live(request: LiveRequest):
 @app.get("/positions")
 async def get_positions():
     return positions_manager.load()
+
+
+# ---------------------------------------------------------------------------
+# Trade endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/trade/buy", response_model=TradeResponse)
+async def trade_buy(req: TradeRequest):
+    if req.contracts <= 0:
+        raise HTTPException(status_code=400, detail="contracts must be positive")
+    if req.price <= 0:
+        raise HTTPException(status_code=400, detail="price must be positive")
+    side = req.side.lower()
+    if side not in ("yes", "no"):
+        raise HTTPException(status_code=400, detail="side must be 'yes' or 'no'")
+
+    cost = req.price * req.contracts
+    bp = positions_manager.get_buying_power()
+    if cost > bp:
+        raise HTTPException(status_code=400, detail=f"Insufficient buying power: need ${cost:.2f}, have ${bp:.2f}")
+
+    action = f"BUY {side.upper()}"
+    order_id = positions_manager.record_trade(req.ticker, action, req.contracts, req.price)
+    state = positions_manager.load()
+    return TradeResponse(
+        order_id=order_id,
+        ticker=req.ticker,
+        action=action,
+        side=side,
+        contracts=req.contracts,
+        price=req.price,
+        buying_power=state["buying_power"],
+    )
+
+
+@app.post("/trade/sell", response_model=TradeResponse)
+async def trade_sell(req: TradeRequest):
+    if req.contracts <= 0:
+        raise HTTPException(status_code=400, detail="contracts must be positive")
+    if req.price <= 0:
+        raise HTTPException(status_code=400, detail="price must be positive")
+    side = req.side.lower()
+    if side not in ("yes", "no"):
+        raise HTTPException(status_code=400, detail="side must be 'yes' or 'no'")
+
+    positions = positions_manager.load().get("positions", {})
+    held = positions.get(req.ticker)
+    if not held or held.get("side") != side:
+        raise HTTPException(status_code=400, detail=f"No {side.upper()} position held for {req.ticker}")
+    if held.get("contracts", 0) < req.contracts:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot sell {req.contracts} contracts — only holding {held['contracts']}",
+        )
+
+    action = f"SELL {side.upper()}"
+    order_id = positions_manager.record_trade(req.ticker, action, req.contracts, req.price)
+    state = positions_manager.load()
+    return TradeResponse(
+        order_id=order_id,
+        ticker=req.ticker,
+        action=action,
+        side=side,
+        contracts=req.contracts,
+        price=req.price,
+        buying_power=state["buying_power"],
+    )
+
+
+@app.post("/trade/reset")
+async def trade_reset():
+    state = {"buying_power": 1000.0, "positions": {}, "trade_history": []}
+    positions_manager._save(state)
+    return state
+
+
+@app.get("/trade/history")
+async def trade_history():
+    return positions_manager.load().get("trade_history", [])
+
 
 CLOCK_TOLERANCE = 0.10   # 10% deviation to flag as outlier
 OUTLIER_ACCEPT = 30      # accept VLM value after this many consecutive outliers
