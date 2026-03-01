@@ -1,1 +1,1 @@
-python main.py --id 26feb09arizku --endpoint https://mahitmehta--qwen3-vl-inference-inference-serve.modal.run/v1 --score-endpoint https://mahitmehta--qwen3-vl-inference-scoreinference-serve.modal.run/v1/score
+python main.py --id 26feb09arizku --endpoint https://adityapdev13--qwen3-vl-inference-inference-serve.modal.run/v1  --score-endpoint  https://adityapdev13--qwen3-vl-inference-scoreinference-serve.modal.run/v1/score
