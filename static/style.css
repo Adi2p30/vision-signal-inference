@@ -75,6 +75,30 @@ video { width: 100%; flex-shrink: 0; background: #000; border: 1px solid #1a1a1a
 }
 .drought .d-val { color: #888; }
 
+.sb-period {
+  color: #888; font-size: 10px; letter-spacing: 0.08em; font-weight: 700;
+  margin-left: 6px; padding: 1px 5px; border: 1px solid #333; border-radius: 3px;
+}
+.sb-correction {
+  font-size: 9px; color: #333; letter-spacing: 0.06em; text-transform: uppercase;
+  margin-top: 2px; min-height: 14px;
+}
+.sb-correction.active { color: #ffb428; animation: corr-blink 1s ease-in-out infinite; }
+@keyframes corr-blink { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+.flags-container { display: none; padding: 0 20px; }
+.flag {
+  padding: 10px 14px; margin: 8px 0; border-left: 3px solid #666;
+  font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  animation: flag-pulse 1.5s ease-in-out infinite;
+}
+.flag-high { background: rgba(255,60,60,0.12); border-left-color: #ff3c3c; color: #ff6b6b; }
+.flag-medium { background: rgba(255,180,40,0.12); border-left-color: #ffb428; color: #ffc857; }
+.flag-low { background: rgba(100,200,255,0.08); border-left-color: #4a9eff; color: #7ab8ff; }
+.flag-label { font-weight: 700; margin-right: 8px; }
+.flag-msg { font-weight: 400; }
+@keyframes flag-pulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+
 .entries { flex: 1; overflow-y: auto; padding: 12px 20px; }
 .entries::-webkit-scrollbar { width: 4px; }
 .entries::-webkit-scrollbar-thumb { background: #222; }

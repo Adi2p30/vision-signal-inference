@@ -22,11 +22,13 @@ SCORE_PROMPT = (
     "/no_think\n"
     "ONLY output one CSV row. No headers, no explanation, no markdown, no extra text.\n"
     "If you cannot see the scoreboard or game clock clearly, output exactly: NONE\n"
-    "Columns: team_a_score,team_b_score,game_clock\n"
+    "Columns: team_a_score,team_b_score,game_clock,period\n"
     "- team_a_score: left team's score as integer\n"
     "- team_b_score: right team's score as integer\n"
     "- game_clock: countdown timer shown on screen, format MM:SS (e.g. 14:32, 03:07)\n"
-    "Example: 45,42,14:32"
+    "- period: current half/period number shown on scoreboard (1 or 2)\n"
+    "Example: 45,42,14:32,2\n"
+    "Example under 1 min: 52,50,0:48,2"
 )
 
 
